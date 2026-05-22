@@ -23,6 +23,20 @@ def get_memory_usage_mb() -> float:
     return process.memory_info().rss / (1024 * 1024)
 
 
+def _slice_to_envs(value, env_ids):
+    """Slice a recorder-term value (tensor or nested dict of tensors) to a subset of envs.
+
+    Terms emit values shaped (num_envs, ...). add_to_episodes uses positional indexing
+    on the leading axis, so when forwarding only a subset of rows we need the leading
+    dim aligned with env_ids.
+    """
+    if isinstance(value, dict):
+        return {k: _slice_to_envs(v, env_ids) for k, v in value.items()}
+    if isinstance(value, torch.Tensor):
+        return value[env_ids]
+    return value
+
+
 def get_episode_data_size(episode: EpisodeData) -> dict:
     """Get size info about episode data buffer."""
     if episode.is_empty():
@@ -226,30 +240,125 @@ class RobolabRecorderManager(RecorderManager):
 
         return info
 
-    def record_post_step(self) -> None:
-        """Trigger recorder terms for post-step functions with auto-flush support.
+    def _active_env_ids(self) -> list[int]:
+        """Env ids that are still actively recording.
 
-        This overrides the parent method to add automatic flushing every N steps
-        to prevent OOM on long episodes.
+        Frozen envs have already had their demo finalized via export_episodes;
+        further recorder writes for them must be suppressed to prevent two failure
+        modes:
+        - Within-run corruption: auto-flush with episode_index=None falls through
+          to _demo_count in StreamingHDF5DatasetFileHandler.append_data, leaking
+          data into whichever env's demo is currently open at that index.
+        - Cross-run contamination: leftover _episodes[N] persists across runs
+          (recorder state is not reset between run_episode calls in the eval flow)
+          and would land in run K+1's demo_N on the first auto-flush.
+
+        Falls back to all envs if the env doesn't expose ``_frozen_envs`` — matches
+        upstream RecorderManager behavior for non-RobolabEnv subclasses.
         """
-        # Do nothing if no active recorder terms are provided
+        frozen = getattr(self._env, "_frozen_envs", None)
+        if frozen is None:
+            return list(range(self._env.num_envs))
+        return (~frozen).nonzero(as_tuple=False).squeeze(-1).tolist()
+
+    def record_pre_step(self) -> None:
+        """Trigger recorder terms for pre-step functions, skipping frozen envs.
+
+        See _active_env_ids for rationale.
+        """
         if len(self.active_terms) == 0:
             return
 
-        # Call parent to record the data
+        active = self._active_env_ids()
+        if not active:
+            return
+
+        needs_slice = len(active) < self._env.num_envs
+
+        for term in self._terms.values():
+            key, value = term.record_pre_step()
+            if key is None:
+                continue
+            if needs_slice:
+                value = _slice_to_envs(value, active)
+            self.add_to_episodes(key, value, env_ids=active)
+
+    def record_post_step(self) -> None:
+        """Trigger recorder terms for post-step functions with auto-flush support.
+
+        Skips frozen envs; see _active_env_ids.
+        """
+        if len(self.active_terms) == 0:
+            return
+
+        active = self._active_env_ids()
+        if not active:
+            return
+
+        needs_slice = len(active) < self._env.num_envs
+
         for term in self._terms.values():
             key, value = term.record_post_step()
-            self.add_to_episodes(key, value)
+            if key is None:
+                continue
+            if needs_slice:
+                value = _slice_to_envs(value, active)
+            self.add_to_episodes(key, value, env_ids=active)
 
-        # Increment step count and check if we need to auto-flush
         if self._flush_interval > 0:
-            for env_id in range(self._env.num_envs):
+            for env_id in active:
                 self._step_count[env_id] += 1
 
                 if self._step_count[env_id] >= self._flush_interval:
-                    # Time to flush this environment's buffer
                     self.flush_buffer(env_ids=[env_id], verbose=self._auto_flush_verbose)
                     self._step_count[env_id] = 0
+
+    def record_pre_reset(
+        self,
+        env_ids: Sequence[int] | None,
+        force_export_or_skip=None,
+    ) -> None:
+        """Filter env_ids to non-frozen, then delegate to upstream.
+
+        ManagerBasedRLEnv.step() passes the unfiltered reset_buf, which keeps
+        flagging frozen envs every step (their timeout/success conditions stay
+        True after termination). Without this filter, upstream record_pre_reset
+        would re-record finalized envs, feeding the cross-run leak.
+        """
+        if len(self.active_terms) == 0:
+            return
+
+        if env_ids is None:
+            env_ids = list(range(self._env.num_envs))
+        if isinstance(env_ids, torch.Tensor):
+            env_ids = env_ids.tolist()
+
+        active_set = set(self._active_env_ids())
+        env_ids = [e for e in env_ids if e in active_set]
+        if not env_ids:
+            return
+
+        super().record_pre_reset(env_ids, force_export_or_skip=force_export_or_skip)
+
+    def record_post_reset(self, env_ids: Sequence[int] | None) -> None:
+        """Filter env_ids to non-frozen, then delegate to upstream.
+
+        See record_pre_reset for rationale.
+        """
+        if len(self.active_terms) == 0:
+            return
+
+        if env_ids is None:
+            env_ids = list(range(self._env.num_envs))
+        if isinstance(env_ids, torch.Tensor):
+            env_ids = env_ids.tolist()
+
+        active_set = set(self._active_env_ids())
+        env_ids = [e for e in env_ids if e in active_set]
+        if not env_ids:
+            return
+
+        super().record_post_reset(env_ids)
 
     def flush_buffer(self, env_ids: Sequence[int] | None = None, verbose: bool = True):
         """Flush the current buffer to disk without finalizing the episode.
@@ -353,17 +462,37 @@ class RobolabRecorderManager(RecorderManager):
         if isinstance(env_ids, torch.Tensor):
             env_ids = env_ids.tolist()
 
+        # Filter to envs with a pending episode to finalize. An env with no
+        # episode_index and no active streaming session has either never been
+        # armed via set_episode_index or was already exported (we reset both to
+        # the no-pending state at finalize). Proceeding for such envs would
+        # spuriously write an extra demo via the write_episode fallback after
+        # record_final_status adds an entry to its (otherwise-empty) buffer.
+        env_ids = [
+            e for e in env_ids
+            if self._current_episode_index.get(e) is not None
+            or self._streaming_active.get(e, False)
+        ]
+        if not env_ids:
+            return
+
         # Lazy-init HDF5 on first write
         if not self._hdf5_initialized:
             self._ensure_hdf5_handler()
 
-        # Record final status for incomplete tasks BEFORE exporting
-        # This ensures error codes are registered for stalled conditions
+        # Record final status for incomplete tasks BEFORE exporting. Scoped to
+        # env_ids being exported — record_final_status returns data for all envs
+        # by convention, so without slicing we'd append a "subtask" entry to
+        # every env's _episodes on every per-env export call, leaking into the
+        # buffers of envs already finalized in prior export_episodes calls.
+        needs_slice = len(env_ids) < self._env.num_envs
         for term in self._terms.values():
             if hasattr(term, 'record_final_status'):
                 key, value = term.record_final_status()
                 if key is not None and value is not None:
-                    self.add_to_episodes(key, value)
+                    if needs_slice:
+                        value = _slice_to_envs(value, env_ids)
+                    self.add_to_episodes(key, value, env_ids=env_ids)
 
         # Get export mode from config
         cfg: RecorderManagerBaseCfg = self.cfg  # type: ignore
@@ -407,6 +536,13 @@ class RobolabRecorderManager(RecorderManager):
                         target_handler.end_episode(success=episode_succeeded, episode_index=episode_index)
                     else:
                         target_handler.write_episode(episode)
+
+            # Clear in-memory buffer and reset auto-flush counter now that
+            # this env's demo is finalized in HDF5. Pairs with the frozen-env
+            # skip in record_post_step: belt for the data we'll never record
+            # again, suspenders for the data already in the buffer at export.
+            self._episodes[env_id] = EpisodeData()
+            self._step_count[env_id] = 0
 
             # Reset episode index after export
             self._current_episode_index[env_id] = None
