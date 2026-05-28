@@ -20,15 +20,19 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .base_client import InferenceClient
-    from .episode import run_episode
+    from .episode import run_episode, run_forked_episode
     from .runner import add_common_eval_args, run_evaluation
+    from .state_restoration import load_state_at_timestep, restore_scene_state
     from .summarize import summarize_run
 
 __all__ = [
     "InferenceClient",
     "add_common_eval_args",
+    "load_state_at_timestep",
+    "restore_scene_state",
     "run_episode",
     "run_evaluation",
+    "run_forked_episode",
     "summarize_run",
 ]
 
@@ -42,10 +46,18 @@ def __getattr__(name: str):
         from .episode import run_episode
 
         return run_episode
+    if name == "run_forked_episode":
+        from .episode import run_forked_episode
+
+        return run_forked_episode
     if name == "summarize_run":
         from .summarize import summarize_run
 
         return summarize_run
+    if name in ("load_state_at_timestep", "restore_scene_state"):
+        from . import state_restoration
+
+        return getattr(state_restoration, name)
     if name in ("add_common_eval_args", "run_evaluation"):
         from . import runner
 

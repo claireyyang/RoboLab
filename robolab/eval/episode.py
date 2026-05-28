@@ -193,3 +193,163 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
 
     timing = timer.to_dict(actual_steps)
     return env.get_env_results(), subtask_status, timing
+
+
+def run_forked_episode(
+    env,
+    env_cfg,
+    episode,
+    client: InferenceClient,
+    *,
+    hdf5_path: str,
+    fork_timestep: int,
+    fork_instruction: str,
+    source_episode: int = 0,
+    headless=False,
+    save_videos=True,
+    video_mode="all",
+):
+    """Run a policy episode forked from a saved simulation state.
+
+    Restores the exact world state at *fork_timestep* from the HDF5 file
+    produced by a prior eval run, swaps in the corrected instruction, and
+    lets the policy continue from that point.  The environment's existing
+    termination predicates evaluate success/failure as usual.
+
+    Args:
+        env: The environment instance (RobolabEnv with num_envs >= 1).
+        env_cfg: Environment configuration.
+        episode: Run index for output naming (e.g. ``run_{episode}.hdf5``).
+        client: Constructed inference client.
+        hdf5_path: Path to the source HDF5 file containing the original
+            episode's per-step ``states/`` data.
+        fork_timestep: Simulation step index at which to fork.
+        fork_instruction: The participant's corrected instruction to use
+            from the fork point onward.
+        source_episode: Demo index inside the HDF5 file to read state from
+            (typically 0 for single-env runs).
+        headless: If True, don't display video.
+        save_videos: If True, save per-env episode videos.
+        video_mode: Which videos to save: 'all', 'viewport', 'sensor', 'none'.
+
+    Returns:
+        tuple: (env_results, subtask_status, timing) — same shape as
+            :func:`run_episode`.
+    """
+    from robolab.eval.state_restoration import load_state_at_timestep, restore_scene_state
+
+    timer = TimingStats()
+
+    # --- Bootstrap the env (need a reset to initialise scene + managers) ---
+    obs, _ = env.reset()
+    obs, _ = env.reset()
+
+    # --- Restore the saved state at the fork timestep ---
+    state_dict = load_state_at_timestep(hdf5_path, source_episode, fork_timestep)
+    restore_scene_state(env, state_dict)
+
+    # Settle physics and render fresh observations after state injection
+    env.scene.write_data_to_sim()
+    env.sim.step(render=True)
+    obs = env._get_observations()
+
+    max_steps = env.max_episode_length - fork_timestep
+    video_fps = 1 / (env_cfg.sim.render_interval * env_cfg.sim.dt)
+    instruction = fork_instruction
+    action_dim = getattr(
+        getattr(env, "action_manager", None),
+        "total_action_dim",
+        None,
+    ) or env.action_space.shape[-1]
+
+    subtask_status = []
+    clients = [client] * env.num_envs
+
+    # Set up per-run HDF5 file and per-env demo indices
+    if env.recorder_manager is not None and hasattr(env.recorder_manager, 'set_hdf5_file'):
+        env.recorder_manager.set_hdf5_file(f"run_{episode}.hdf5")
+        for env_id in range(env.num_envs):
+            env.recorder_manager.set_episode_index(env_id, env_ids=[env_id])
+
+    # Setup per-env streaming video writers
+    save_sensor = save_videos and video_mode in ("all", "sensor")
+    save_viewport = save_videos and video_mode in ("all", "viewport")
+    cleaned_instruction = re.sub(r'[^\w\s]', '', instruction).replace(' ', '_')
+    video_writers_obs: list[VideoWriter] = []
+    video_writers_viewport: list[VideoWriter] = []
+    if save_videos:
+        for env_id in range(env.num_envs):
+            suffix = f"_{episode}_env{env_id}" if env.num_envs > 1 else f"_{episode}"
+            if save_sensor:
+                video_path = os.path.join(get_output_dir(), f"{cleaned_instruction}{suffix}.mp4")
+                video_writers_obs.append(VideoWriter(video_path, video_fps))
+            if save_viewport:
+                video_path_viewport = os.path.join(get_output_dir(), f"{cleaned_instruction}{suffix}_viewport.mp4")
+                video_writers_viewport.append(VideoWriter(video_path_viewport, video_fps))
+
+    import omni.kit.app
+    import omni.timeline
+    timeline = omni.timeline.get_timeline_interface()
+    kit_app = omni.kit.app.get_app()
+
+    actual_steps = 0
+    try:
+        for step in tqdm(range(max_steps), desc=f"forked@{fork_timestep}"):
+
+            while not timeline.is_playing():
+                kit_app.update()
+
+            timer.start("policy_inference")
+            actions = torch.zeros(env.num_envs, action_dim, device=env.device)
+            last_viz = None
+            for env_id in env.active_env_ids:
+                ret = clients[env_id].infer(obs, instruction, env_id=env_id)
+                actions[env_id] = torch.tensor(ret["action"], device=env.device)
+                if env_id == 0 or last_viz is None:
+                    last_viz = ret.get("viz")
+            timer.stop("policy_inference")
+
+            if not headless and last_viz is not None:
+                cv2.imshow(f"[forked] {instruction}", cv2.cvtColor(last_viz, cv2.COLOR_RGB2BGR))
+                cv2.waitKey(1)
+
+            if VISUALIZE:
+                get_world(env).visualize()
+
+            timer.start("env_step")
+            obs, reward, term, trunc, info = env.step(actions)
+            timer.stop("env_step")
+
+            per_env_infos = get_all_env_subtask_infos(env)
+            subtask_status.append(per_env_infos)
+
+            if save_videos:
+                timer.start("video_write")
+                for env_id in range(env.num_envs):
+                    if env._frozen_envs[env_id]:
+                        continue
+                    if save_sensor:
+                        frame_obs = unpack_image_obs(obs, scale=0.5, env_id=env_id).get("combined_image")
+                        video_writers_obs[env_id].write(frame_obs)
+                    if save_viewport:
+                        frame_vp = unpack_viewport_cams(obs, env_id=env_id).get("combined_image")
+                        video_writers_viewport[env_id].write(frame_vp)
+                timer.stop("video_write")
+
+            actual_steps += 1
+
+            if env.all_terminated:
+                break
+    finally:
+        for vw in video_writers_obs + video_writers_viewport:
+            try:
+                vw.release()
+            except Exception:
+                logger.exception("Failed to release video writer")
+        try:
+            client.reset()
+        except Exception:
+            logger.exception("Failed to reset client after episode")
+
+    timing = timer.to_dict(actual_steps)
+    return env.get_env_results(), subtask_status, timing
