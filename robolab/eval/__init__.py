@@ -22,12 +22,14 @@ if TYPE_CHECKING:
     from .base_client import InferenceClient
     from .episode import run_episode, run_forked_episode
     from .runner import add_common_eval_args, run_evaluation
+    from .screen_to_world import identify_clicked_object
     from .state_restoration import load_state_at_timestep, restore_scene_state
     from .summarize import summarize_run
 
 __all__ = [
     "InferenceClient",
     "add_common_eval_args",
+    "identify_clicked_object",
     "load_state_at_timestep",
     "restore_scene_state",
     "run_episode",
@@ -54,6 +56,10 @@ def __getattr__(name: str):
         from .summarize import summarize_run
 
         return summarize_run
+    if name == "identify_clicked_object":
+        from .screen_to_world import identify_clicked_object
+
+        return identify_clicked_object
     if name in ("load_state_at_timestep", "restore_scene_state"):
         from . import state_restoration
 
