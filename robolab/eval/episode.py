@@ -204,7 +204,7 @@ def run_forked_episode(
     hdf5_path: str,
     fork_timestep: int,
     fork_instruction: str,
-    source_episode: int = 0,
+    source_env: int = 0,
     headless=False,
     save_videos=True,
     video_mode="all",
@@ -226,8 +226,8 @@ def run_forked_episode(
         fork_timestep: Simulation step index at which to fork.
         fork_instruction: The participant's corrected instruction to use
             from the fork point onward.
-        source_episode: Demo index inside the HDF5 file to read state from
-            (typically 0 for single-env runs).
+        source_env: Env/demo index inside the source HDF5 file to read state
+            from (``demo_{source_env}``; typically 0 for single-env runs).
         headless: If True, don't display video.
         save_videos: If True, save per-env episode videos.
         video_mode: Which videos to save: 'all', 'viewport', 'sensor', 'none'.
@@ -236,7 +236,10 @@ def run_forked_episode(
         tuple: (env_results, subtask_status, timing) — same shape as
             :func:`run_episode`.
     """
-    from robolab.eval.state_restoration import load_state_at_timestep, restore_scene_state
+    from robolab.eval.state_restoration import (
+        load_state_at_timestep,
+        state_dict_for_reset_to,
+    )
 
     timer = TimingStats()
 
@@ -245,13 +248,12 @@ def run_forked_episode(
     obs, _ = env.reset()
 
     # --- Restore the saved state at the fork timestep ---
-    state_dict = load_state_at_timestep(hdf5_path, source_episode, fork_timestep)
-    restore_scene_state(env, state_dict)
-
-    # Settle physics and render fresh observations after state injection
-    env.scene.write_data_to_sim()
-    env.sim.step(render=True)
-    obs = env._get_observations()
+    state_dict = load_state_at_timestep(hdf5_path, source_env, fork_timestep)
+    scene_state = state_dict_for_reset_to(state_dict, env)
+    obs, _ = env.reset_to(scene_state, env_ids=None, is_relative=True)
+    env.episode_length_buf[:] = fork_timestep
+    env.reset_eval_state()
+    client.reset()
 
     max_steps = env.max_episode_length - fork_timestep
     video_fps = 1 / (env_cfg.sim.render_interval * env_cfg.sim.dt)

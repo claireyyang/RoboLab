@@ -1,5 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
 # isort: skip_file
 
 """Evaluate participant corrections by forking from saved simulation states.
@@ -19,8 +17,12 @@ Usage:
 
 The corrections JSONL file should have one JSON object per line::
 
-    {"task": "BananaInBowlTask", "timestep": 120, "instruction": "pick up the banana by the stem", "source_episode": 0}
-    {"task": "RubiksCubeAndBananaTask", "timestep": 85, "instruction": "grab the cube first", "source_episode": 0}
+    {"task": "BananaInBowlTask", "timestep": 120, "instruction": "pick up the banana by the stem", "source_run": 0}
+    {"task": "RubiksCubeAndBananaTask", "timestep": 85, "instruction": "grab the cube first", "source_run": 5, "source_env": 0}
+
+``source_run`` selects which eval run to fork from (``run_{source_run}.hdf5``).
+For multi-env runs, ``source_env`` selects the parallel env inside that file
+(default 0). ``source_episode`` is accepted as an alias for ``source_run``.
 """
 
 import argparse
@@ -119,9 +121,10 @@ def main() -> None:
         task = correction["task"]
         timestep = correction["timestep"]
         corrected_instruction = correction["instruction"]
-        source_episode = correction.get("source_episode", 0)
+        source_run = correction.get("source_run", correction.get("source_episode", 0))
+        source_env = correction.get("source_env", 0)
         source_hdf5 = os.path.join(
-            args_cli.source_run, task, f"run_{source_episode}.hdf5",
+            args_cli.source_run, task, f"run_{source_run}.hdf5",
         )
 
         if not os.path.exists(source_hdf5):
@@ -158,7 +161,7 @@ def main() -> None:
             hdf5_path=source_hdf5,
             fork_timestep=timestep,
             fork_instruction=corrected_instruction,
-            source_episode=source_episode,
+            source_env=source_env,
             save_videos=save_videos,
             video_mode=args_cli.video_mode,
             headless=args_cli.headless,

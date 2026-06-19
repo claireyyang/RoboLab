@@ -53,6 +53,39 @@ def _walk_hdf5_group(group: h5py.Group, timestep: int, out: dict) -> None:
             out[key] = child[timestep]
 
 
+def state_dict_for_reset_to(
+    state_dict: dict,
+    env,
+    env_ids: torch.Tensor | list[int] | None = None,
+) -> dict:
+    """Convert an HDF5 snapshot dict into the format expected by ``env.reset_to``.
+
+    Leaf arrays from :func:`load_state_at_timestep` are single-env vectors;
+    this expands them to batched torch tensors with shape ``(num_envs, ...)``.
+    """
+    if env_ids is None:
+        num_envs = env.num_envs
+    elif isinstance(env_ids, list):
+        num_envs = len(env_ids)
+    else:
+        num_envs = len(env_ids)
+
+    def _convert(node):
+        if isinstance(node, dict):
+            return {key: _convert(value) for key, value in node.items()}
+        tensor = torch.as_tensor(node, dtype=torch.float32, device=env.device)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0).expand(num_envs, -1).clone()
+        elif tensor.ndim == 2:
+            tensor = tensor.unsqueeze(0).expand(num_envs, *tensor.shape[1:]).clone()
+        return tensor
+
+    scene_state = _convert(state_dict)
+    if "deformable" in scene_state and "deformable_object" not in scene_state:
+        scene_state["deformable_object"] = scene_state.pop("deformable")
+    return scene_state
+
+
 def restore_scene_state(
     env,
     state_dict: dict,
@@ -64,9 +97,9 @@ def restore_scene_state(
     from a snapshot dict (produced by :func:`load_state_at_timestep`) instead
     of the asset's ``default_root_state``.
 
-    After calling this, the caller should step the sim once (or call
-    ``env.scene.write_data_to_sim()`` + ``env.sim.step()``) to let PhysX
-    settle before starting the policy loop.
+    Prefer :meth:`ManagerBasedEnv.reset_to` via :func:`state_dict_for_reset_to`
+    when restoring inside a forked episode; it also sets joint targets and
+    computes observations through the normal env path.
 
     Args:
         env: A :class:`RobolabEnv` (or any ``ManagerBasedRLEnv``).

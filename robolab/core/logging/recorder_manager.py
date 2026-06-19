@@ -23,17 +23,30 @@ def get_memory_usage_mb() -> float:
     return process.memory_info().rss / (1024 * 1024)
 
 
+def _env_index_tensor(env_ids, device: torch.device) -> torch.Tensor:
+    """Build a long index tensor on ``device`` for leading-dim env selection."""
+    if isinstance(env_ids, torch.Tensor):
+        return env_ids.to(device=device, dtype=torch.long)
+    return torch.tensor(env_ids, device=device, dtype=torch.long)
+
+
 def _slice_to_envs(value, env_ids):
     """Slice a recorder-term value (tensor or nested dict of tensors) to a subset of envs.
 
     Terms emit values shaped (num_envs, ...). add_to_episodes uses positional indexing
     on the leading axis, so when forwarding only a subset of rows we need the leading
     dim aligned with env_ids.
+
+    Uses ``index_select`` instead of ``value[env_ids]`` because CUDA advanced indexing
+    is not implemented for some integer dtypes (e.g. uint16 subtask status codes).
     """
     if isinstance(value, dict):
         return {k: _slice_to_envs(v, env_ids) for k, v in value.items()}
     if isinstance(value, torch.Tensor):
-        return value[env_ids]
+        if value.ndim == 0:
+            return value
+        idx = _env_index_tensor(env_ids, device=value.device)
+        return value.index_select(0, idx)
     return value
 
 
