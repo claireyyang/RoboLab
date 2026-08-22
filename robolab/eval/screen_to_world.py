@@ -1,23 +1,39 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: CC-BY-NC-4.0
 
-"""Project a participant's screen click back into the 3D simulation world.
+"""Project between 2D viewport screen coordinates and the 3D simulation world.
 
-Given a normalized 2D click position on the viewport video (the
-``egocentric_mirrored_camera`` frame), this module casts a ray through the
-camera's pinhole model and identifies which object (or world point) the
-participant was pointing at.
+This module provides two complementary directions:
+
+**Screen → World** (click identification)
+    Given a normalized 2D click position on the viewport video (the
+    ``egocentric_mirrored_camera`` frame), cast a ray through the camera's
+    pinhole model and identify which object the participant was pointing at.
+
+**World → Screen** (object projection)
+    Given a 3D world position (e.g. an object centroid loaded from the HDF5
+    file), project it through the camera model to obtain the corresponding
+    pixel / percentage coordinate on the 864 × 480 viewport video.
 
 Typical usage
 -------------
->>> from robolab.eval.screen_to_world import identify_clicked_object
+>>> from robolab.eval.screen_to_world import identify_clicked_object, objects_to_screen_coords
+
+>>> # Click → world
 >>> result = identify_clicked_object(
 ...     u_frac=0.45, v_frac=0.62,
 ...     hdf5_path="output/.../run_0.hdf5",
 ...     episode=0, timestep=120,
 ... )
->>> result["closest_object"]   # e.g. "banana"
->>> result["world_point"]      # (x, y, z) on the table plane
+>>> result.closest_object   # e.g. "banana"
+>>> result.table_point      # (x, y, z) on the table plane
+
+>>> # World → screen
+>>> coords = objects_to_screen_coords(
+...     hdf5_path="output/.../run_0.hdf5",
+...     episode=0, timestep=120,
+... )
+>>> coords["banana"]   # e.g. (0.52, 0.61)  — (pct_x, pct_y) in [0, 1]
 """
 
 from __future__ import annotations
@@ -251,6 +267,59 @@ def load_camera_extrinsics(
     return pos, quat_xyzw
 
 
+def world_to_screen(
+    world_point: np.ndarray,
+    camera_pos: np.ndarray,
+    camera_quat_xyzw: np.ndarray,
+    intrinsics: CameraIntrinsics | None = None,
+) -> tuple[float, float] | None:
+    """Project a 3D world point onto the viewport screen.
+
+    This is the inverse of :func:`screen_to_ray`: given a world-frame position
+    (e.g. an object centroid from the HDF5 file), returns the corresponding
+    normalised screen coordinate.
+
+    Args:
+        world_point: 3D position in world frame (3,).
+        camera_pos: World-frame camera position (3,).
+        camera_quat_xyzw: Camera orientation quaternion in scipy / ROS
+            convention ``(x, y, z, w)``, as stored in the HDF5 by
+            :class:`InitialStateRecorder` under
+            ``initial_state/cameras/<name>/orientation``.
+        intrinsics: Camera intrinsic parameters.  Defaults to the viewport
+            camera (``EgocentricMirroredCameraCfg``, 864 × 480).
+
+    Returns:
+        ``(pct_x, pct_y)`` as fractions in ``[0, 1]``, where ``(0, 0)`` is
+        the top-left corner and ``(1, 1)`` is the bottom-right corner of the
+        video frame.  Returns ``None`` if the point is behind (or on) the
+        camera image plane.
+    """
+    if intrinsics is None:
+        intrinsics = CameraIntrinsics()
+
+    # Transform world point into camera frame.
+    R_cam2world = Rotation.from_quat(camera_quat_xyzw).as_matrix()
+    R_world2cam = R_cam2world.T
+    P_cam = R_world2cam @ (np.asarray(world_point, dtype=np.float64) - np.asarray(camera_pos, dtype=np.float64))
+
+    # OpenGL convention: camera looks along -Z.  Points in front have P_cam[2] < 0.
+    if P_cam[2] >= 0:
+        return None
+
+    # Perspective division — produces the same x_cam / y_cam as screen_to_ray.
+    x_cam = P_cam[0] / (-P_cam[2])
+    y_cam = P_cam[1] / (-P_cam[2])
+
+    # Invert the two equations from screen_to_ray:
+    #   x_cam = (u_px - cx) / fx  →  u_px = x_cam * fx + cx
+    #   y_cam = -(v_px - cy) / fy →  v_px = cy - y_cam * fy
+    u_px = x_cam * intrinsics.fx + intrinsics.cx
+    v_px = intrinsics.cy - y_cam * intrinsics.fy
+
+    return u_px / intrinsics.width, v_px / intrinsics.height
+
+
 # ---------------------------------------------------------------------------
 # High-level API
 # ---------------------------------------------------------------------------
@@ -320,3 +389,46 @@ def identify_clicked_object(
             result.closest_distance = closest_dist
 
     return result
+
+
+def objects_to_screen_coords(
+    hdf5_path: str,
+    episode: int,
+    timestep: int,
+    camera_name: str = "egocentric_mirrored_camera",
+    intrinsics: CameraIntrinsics | None = None,
+) -> dict[str, tuple[float, float] | None]:
+    """Project all scene objects at a given timestep to viewport screen coordinates.
+
+    Reads object centroids from the HDF5 file (bbox recorder centroids, or
+    rigid-object root poses as fallback) and projects each one through the
+    pinhole camera model to obtain its position on the 864 × 480 viewport
+    video.
+
+    Args:
+        hdf5_path: Path to the run HDF5 (e.g. ``run_0.hdf5``).
+        episode: Demo index (typically 0 for single-env runs).
+        timestep: Simulation step to read centroids from.
+        camera_name: Name of the viewport camera whose frame to project into.
+        intrinsics: Camera intrinsics (defaults to viewport camera).
+
+    Returns:
+        ``{object_name: (pct_x, pct_y)}`` where both values are in ``[0, 1]``
+        (``0`` = left / top edge, ``1`` = right / bottom edge of the video),
+        or ``None`` for objects behind the camera.
+
+    Example::
+
+        coords = objects_to_screen_coords("run_0.hdf5", episode=0, timestep=120)
+        pct_x, pct_y = coords["banana"]   # e.g. (0.52, 0.61)
+        # Equivalent pixel on the 864×480 video:
+        x_px = pct_x * 864   # ≈ 449
+        y_px = pct_y * 480   # ≈ 293
+    """
+    cam_pos, cam_quat_xyzw = load_camera_extrinsics(hdf5_path, episode, camera_name)
+    centroids = load_object_centroids_at_timestep(hdf5_path, episode, timestep)
+
+    return {
+        obj_name: world_to_screen(centroid, cam_pos, cam_quat_xyzw, intrinsics)
+        for obj_name, centroid in centroids.items()
+    }

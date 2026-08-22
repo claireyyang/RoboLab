@@ -26,8 +26,8 @@ class Terminations:
 
 
 @dataclass
-class YogurtInBowlTask(Task):
-    """Task: Put the small yogurt in the red bowl."""
+class CustomMugNextToOrangeJuiceTask(Task):
+    """Task: Place the ceramic mug next to the orange juice."""
     contact_object_list = [
         "table", "bowl", "banana", "bagel_07", "coffee_can", "banana_01",
         "yogurt_cup", "coffee_pot", "ceramic_mug", "pitcher", "fork_big",
@@ -38,16 +38,16 @@ class YogurtInBowlTask(Task):
     scene = import_scene("breakfast_table.usda", contact_object_list)
     terminations = Terminations
     instruction = {
-        "default": "Put the small red yogurt in the red bowl",
-        "vague": "Put the yogurt in the bowl",
-        "specific": "Pick up the small red yogurt container and place it inside the red bowl",
+        "default": "Place the ceramic mug next to the orange juice",
+        "vague": "Place the mug next to the orange juice",
+        "specific": "Pick up the ceramic mug and place it next to the orange juice",
     }
     episode_length_s: int = 30
     attributes = ['color', 'size']
     subtasks = [
         pick_and_place(
-            object=["yogurt_cup"],
-            container="bowl",
+            object=["ceramic_mug"],
+            container="table",
             logical="all",
             score=1.0
         )
