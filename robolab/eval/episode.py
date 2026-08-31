@@ -57,6 +57,16 @@ from robolab.core.utils.video_utils import VideoWriter
 from robolab.core.world.world_state import get_world
 from robolab.eval.base_client import InferenceClient
 
+# Linux NAME_MAX is 255 bytes per path component. Truncate so
+# ``{stem}_{run}_env{id}_viewport.mp4`` stays well under that limit.
+_MAX_VIDEO_STEM_LEN = 80
+
+
+def cleaned_video_stem(instruction: str) -> str:
+    """Sanitize an instruction for use as a video filename stem."""
+    cleaned = re.sub(r"[^\w\s]", "", instruction).replace(" ", "_")
+    return cleaned[:_MAX_VIDEO_STEM_LEN]
+
 
 def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=False, save_videos=True, video_mode="all"):
     """Run a policy-controlled episode across all parallel envs.
@@ -109,7 +119,7 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
     # Setup per-env streaming video writers
     save_sensor = save_videos and video_mode in ("all", "sensor")
     save_viewport = save_videos and video_mode in ("all", "viewport")
-    cleaned_instruction = re.sub(r'[^\w\s]', '', instruction).replace(' ', '_')
+    cleaned_instruction = cleaned_video_stem(instruction)
     # Define unconditionally so the finally clause below can iterate them either way.
     video_writers_obs: list[VideoWriter] = []
     video_writers_viewport: list[VideoWriter] = []
@@ -276,7 +286,7 @@ def run_forked_episode(
     # Setup per-env streaming video writers
     save_sensor = save_videos and video_mode in ("all", "sensor")
     save_viewport = save_videos and video_mode in ("all", "viewport")
-    cleaned_instruction = re.sub(r'[^\w\s]', '', instruction).replace(' ', '_')
+    cleaned_instruction = cleaned_video_stem(instruction)
     video_writers_obs: list[VideoWriter] = []
     video_writers_viewport: list[VideoWriter] = []
     if save_videos:

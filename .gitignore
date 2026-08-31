@@ -35,3 +35,4 @@ docs/doxygen/xml/*
 videos/
 *.code-workspace
 pyrightconfig.json
+*.csv
