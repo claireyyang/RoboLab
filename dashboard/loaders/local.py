@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """Local filesystem loader for RoboLab eval outputs.
 
@@ -316,7 +316,7 @@ class LocalLoader:
     def hdf5_path(self, run_id: str, task: str, run_index: int | None = None) -> Path | None:
         """Locate the HDF5 file for this task. Two conventions exist:
           * single ``data.hdf5`` (default, IsaacLab recorder)
-          * per-run ``run_<N>.hdf5`` (one file per run)
+          * per-run ``run_<N>.hdf5`` (cosmos3-style)
         Returns the first one that has at least one episode under ``/data``.
         """
         task_dir = self._run_dir(run_id) / task

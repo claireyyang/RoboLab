@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """Per-run summarization: turns the raw outputs of :func:`run_episode` into
 persisted per-env log files, HDF5-derived trajectory metrics, and aggregated

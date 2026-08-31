@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import glob
 import json
@@ -155,6 +155,74 @@ def load_hdf5_episode_data(filepath: str, episode: int, key: str) -> np.ndarray:
             raise ValueError(f"Episode {episode} not found in {filepath}")
 
     return actions
+
+
+def load_hdf5_provenance(filepath: str) -> dict:
+    """Load recording provenance attrs (simulator stack versions, record date) from an HDF5 file.
+
+    Returns a dict with whichever of ``isaaclab_version``, ``isaacsim_version``,
+    and ``recorded_at`` were stamped at record time; empty dict for files that
+    predate provenance stamping.
+    """
+    keys = ("isaaclab_version", "isaacsim_version", "recorded_at")
+    with h5py.File(filepath, 'r') as f:
+        data = f.get('data')
+        if data is None:
+            return {}
+        return {key: data.attrs[key] for key in keys if key in data.attrs}
+
+
+def _load_hdf5_group_tree(filepath: str, episode: int, group_name: str) -> dict:
+    """Load a nested HDF5 group under ``data/demo_<episode>`` as a dict of numpy arrays.
+
+    Raises:
+        ValueError: If the episode or the named group is missing.
+    """
+    def _group_to_dict(group: h5py.Group) -> dict:
+        out = {}
+        for name, item in group.items():
+            if isinstance(item, h5py.Group):
+                out[name] = _group_to_dict(item)
+            else:
+                out[name] = item[()]
+        return out
+
+    with h5py.File(filepath, 'r') as f:
+        ep = f.get(f'data/demo_{episode}')
+        if ep is None:
+            raise ValueError(f"Episode {episode} not found in {filepath}")
+        group = ep.get(group_name)
+        if group is None:
+            raise ValueError(f"Episode {episode} in {filepath} has no '{group_name}' group")
+        return _group_to_dict(group)
+
+
+def load_hdf5_initial_state(filepath: str, episode: int) -> dict:
+    """Load the recorded initial scene state for an episode from an HDF5 file.
+
+    Returns the nested ``initial_state`` group as a dict of numpy arrays in the
+    ``InteractiveScene.get_state()`` format, e.g.
+    ``{"articulation": {"robot": {"joint_position": (N, dof), ...}}, "rigid_object": {...}}``.
+    Each leaf keeps its recorded leading dimension (one row per env in the
+    recording session); callers select/tile rows to match their num_envs.
+
+    Raises:
+        ValueError: If the episode or its ``initial_state`` group is missing.
+    """
+    return _load_hdf5_group_tree(filepath, episode, 'initial_state')
+
+
+def load_hdf5_states(filepath: str, episode: int) -> dict:
+    """Load the recorded per-step scene states for an episode from an HDF5 file.
+
+    Returns the nested ``states`` group as a dict of numpy arrays in the
+    ``InteractiveScene.get_state()`` layout, with each leaf shaped
+    ``(num_steps, ...)`` — one row per simulation step, recorded post-step.
+
+    Raises:
+        ValueError: If the episode or its ``states`` group is missing.
+    """
+    return _load_hdf5_group_tree(filepath, episode, 'states')
 
 
 def load_param_file(file_path: str, parent_dir: str = None) -> dict:

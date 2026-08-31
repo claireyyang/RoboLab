@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """
 world_state: "What is the current state?"
@@ -21,12 +21,46 @@ from typing import Any, Callable
 import isaaclab.sim.utils as sim_utils
 import numpy as np
 import torch
-from isaaclab.assets import Articulation, AssetBase, DeformableObject, RigidObject
+from isaaclab.assets import Articulation, AssetBase, RigidObject
+
+try:
+    # IsaacLab 2.2 / IsaacSim 5.0
+    from isaaclab.assets import DeformableObject
+except ImportError:
+    # IsaacLab 2.3 / IsaacSim 5.1 moved deformables into isaaclab_physx
+    from isaaclab_physx.assets import DeformableObject
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.sensors.frame_transformer.frame_transformer import FrameTransformer
 from isaaclab.utils.math import transform_points
 from isaacsim.core.prims import XFormPrim
 from pxr import Gf, Usd, UsdGeom
+
+try:
+    # IsaacLab 2.3 / IsaacSim 5.1 — scene extras are isaaclab.sim.views.XformPrimView
+    from isaaclab.sim.views import XformPrimView
+
+    XFORM_PRIM_TYPES: tuple[type, ...] = (XFormPrim, XformPrimView)
+
+    def _get_scales_usd_float3_safe(self, indices=None) -> torch.Tensor:
+        """Replacement for XformPrimView._get_scales_usd (IsaacLab 2.3.2.post1).
+
+        Upstream assigns ``prim.GetAttribute("xformOp:scale").Get()`` into a
+        ``Vt.Vec3dArray``, which raises ``TypeError: No registered converter ...
+        GfVec3d`` for any prim whose scale is authored as ``float3`` (Gf.Vec3f) —
+        which is how all RoboLab scene assets author it. Only ``double3`` scales
+        survive. Read through plain tuples instead; works for both precisions.
+        """
+        if indices is None or indices == slice(None):
+            indices_list = self._ALL_INDICES
+        else:
+            indices_list = indices.tolist() if isinstance(indices, torch.Tensor) else list(indices)
+        scales = [tuple(self._prims[i].GetAttribute("xformOp:scale").Get()) for i in indices_list]
+        return torch.tensor(scales, dtype=torch.float32, device=self._device)
+
+    XformPrimView._get_scales_usd = _get_scales_usd_float3_safe
+except ImportError:
+    # IsaacLab 2.2 / IsaacSim 5.0 — scene extras are isaacsim.core.prims.XFormPrim
+    XFORM_PRIM_TYPES = (XFormPrim,)
 
 import robolab.constants
 import robolab.core.utils.usd_utils as usd_utils
@@ -109,7 +143,8 @@ class WorldState:
         return entities
 
     @property
-    def extras(self) -> dict[str, XFormPrim]:
+    def extras(self) -> dict:
+        """Scene extras: XFormPrim on IsaacLab 2.2, XformPrimView on 2.3."""
         return self.env.scene.extras
 
     @property
@@ -355,7 +390,7 @@ class WorldState:
         """Get USD prim for a body in a specific env. Used internally for init-time
         geometry caching and visualization. Not called per-step."""
         body = self.get_body(body_name)
-        if isinstance(body, XFormPrim):
+        if isinstance(body, XFORM_PRIM_TYPES):
             idx = min(env_id, len(body.prims) - 1)
             return body.prims[idx]
         prim_path = body.cfg.prim_path
@@ -385,7 +420,7 @@ class WorldState:
                 quat = body.data.root_quat_w.clone().detach()  # (N, 4)
                 if is_relative:
                     pos = pos - self.env.scene.env_origins  # (N, 3)
-        elif isinstance(body, XFormPrim):
+        elif isinstance(body, XFORM_PRIM_TYPES):
             num_prims = len(body._prim_paths) if hasattr(body, '_prim_paths') else body.count
             if env_id is not None:
                 # Clamp index — static extras may have fewer prims than envs
@@ -454,7 +489,7 @@ class WorldState:
             env_id: None → (num_envs, 6), int → (6,)
         """
         body = self.get_body(body_name)
-        if isinstance(body, XFormPrim):
+        if isinstance(body, XFORM_PRIM_TYPES):
             if env_id is None:
                 return torch.zeros(self.env.num_envs, 6, dtype=torch.float32, device=self.env.device)
             return torch.zeros(6, dtype=torch.float32, device=self.env.device)
@@ -479,7 +514,8 @@ class WorldState:
 
     def get_bbox(self, body: str, env_id: int | None = None) -> tuple:
         """
-        Get the Oriented Bounding Box (OBB) for a body in world coordinates.
+        Get the Oriented Bounding Box (OBB) for a body in env-local coordinates
+        (relative to each env's scene origin, via get_pose's default is_relative=True).
 
         Uses cached local geometry + vectorized transform_points for efficiency.
 
@@ -537,7 +573,8 @@ class WorldState:
 
     def get_centroid(self, body: str, env_id: int | None = None):
         """
-        Get the geometric center of a body's OBB in world coordinates.
+        Get the geometric center of a body's OBB in env-local coordinates
+        (relative to each env's scene origin, via get_pose's default is_relative=True).
 
         Args:
             env_id: None → Tensor(num_envs, 3), int → np.ndarray(3,)
@@ -548,12 +585,41 @@ class WorldState:
     #########################################################
     # Contact
     #########################################################
+    def resolve_contact_bodies(self, body: str) -> list[str]:
+        """Resolve a body name through the robot's ``contact_gripper`` declaration.
+
+        A list-valued entry is an alias group meaning "any member" — e.g. a
+        bimanual robot declares ``"gripper": ["left", "right"]`` so benchmark
+        tasks' generic "gripper" checks count either hand. Group members are
+        validated to be concrete labels at sensor-creation time, so resolution
+        is a single lookup. Names without a group entry resolve to themselves.
+        """
+        target = (getattr(self.env.cfg, "contact_gripper", None) or {}).get(body)
+        if isinstance(target, (list, tuple)):
+            return list(target)
+        return [body]
+
     def in_contact(self, body1: str, body2: str, force_threshold: float = 0.1, env_id: int | None = None):
         """Check if two bodies are in contact.
+
+        Either name may be a ``contact_gripper`` alias group, in which case
+        contact with any member counts (results are OR-ed across members).
 
         Args:
             env_id: None → Tensor(num_envs,) bool, int → bool
         """
+        pairs = [
+            (b1, b2)
+            for b1 in self.resolve_contact_bodies(body1)
+            for b2 in self.resolve_contact_bodies(body2)
+        ]
+        if env_id is not None:
+            return any(self._in_contact_pair(b1, b2, force_threshold, env_id) for b1, b2 in pairs)
+        results = [self._in_contact_pair(b1, b2, force_threshold, env_id) for b1, b2 in pairs]
+        return torch.stack(results, dim=0).any(dim=0)  # (N,)
+
+    def _in_contact_pair(self, body1: str, body2: str, force_threshold: float, env_id: int | None):
+        """Contact check for one concrete sensor pair (no alias resolution)."""
         contact_sensor = get_contact_sensor(self.env.scene, body1, body2)
         if env_id is not None:
             force_matrix = contact_sensor.data.force_matrix_w[env_id]
@@ -584,10 +650,23 @@ class WorldState:
 
         Note: This returns a list of object names and is inherently per-env.
         When env_id=None, defaults to env_id=0 for backward compat.
+
+        ``body`` may be a ``contact_gripper`` alias group; candidates in
+        contact with any member are returned.
         """
         if env_id is None:
             env_id = 0
 
+        members = self.resolve_contact_bodies(body)
+        if len(members) > 1:
+            in_contact_any = set()
+            for member in members:
+                in_contact_any.update(
+                    self.get_objects_in_contact_with(member, candidates, force_threshold, env_id=env_id)
+                )
+            return [obj for obj in candidates if obj in in_contact_any]
+
+        body = members[0]
         batch_sensor = get_batch_contact_sensor(self.env.scene, body)
 
         if batch_sensor is None:

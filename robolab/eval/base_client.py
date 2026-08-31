@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 # This file is the source of truth. A verbatim copy lives at
 # droid_plus/eval/base_client.py — keep both in sync when editing.
@@ -42,6 +42,20 @@ class InferenceClient(ABC):
         # they want.
         self._chunks: dict[int, np.ndarray] = {}
         self._counters: dict[int, int] = {}
+        # Set by begin_episode(); see below.
+        self._eval_episode_idx: int = 0
+
+    def begin_episode(self, episode_idx: int) -> None:
+        """Notify the client that a new episode is starting.
+
+        Called by ``run_episode`` before the first inference of each episode.
+        The default stores the index on ``self._eval_episode_idx``. Clients
+        whose server keeps state across a persistent connection can use it to
+        mark episode boundaries in their requests; subclasses that need to
+        notify a server-side session should override and call
+        ``super().begin_episode(episode_idx)``.
+        """
+        self._eval_episode_idx = episode_idx
 
 
     def infer(self, obs: Any, instruction: str, *, env_id: int = 0) -> dict:
@@ -63,6 +77,23 @@ class InferenceClient(ABC):
         action = self._next_action(env_id)
         viz = self._build_visualization(extracted)
         return {"action": action, "viz": viz}
+
+    def infer_batch(
+        self, obs: Any, instruction: str, *, env_ids: list[int]
+    ) -> dict[int, dict]:
+        """Infer actions for several envs in one call.
+
+        Returns ``{env_id: {"action": ..., "viz": ...}}`` with one entry per
+        requested env. Default implementation is a serial loop over
+        :meth:`infer` — behavior-identical to the historical per-env eval
+        loop, so every existing client works unchanged. Clients whose server
+        supports batched payloads can override this to issue one request for
+        all envs needing a replan.
+        """
+        return {
+            env_id: self.infer(obs, instruction, env_id=env_id)
+            for env_id in env_ids
+        }
 
     def reset(self, *, env_id: int | None = None) -> None:
         """Clear per-episode state. ``env_id=None`` resets all envs.
@@ -108,6 +139,51 @@ class InferenceClient(ABC):
     @abstractmethod
     def _unpack_response(self, response: Any) -> np.ndarray:
         """Return a ``(horizon, action_dim)`` numpy array."""
+
+    # ------------------------------------------------------------------
+    # Observation helpers (generic; no backend or camera knowledge)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_obs_term(raw_obs: Any, term_name: str) -> Any | None:
+        """Look up an observation term by name across all observation groups.
+
+        Scans every mapping-valued entry of ``raw_obs`` (observation groups
+        like ``image_obs`` / ``viewport_cam`` / ``proprio_obs``) and returns
+        the first batched value stored under ``term_name``, or None if no
+        group has it. Term names are unique across groups in RoboLab
+        registrations.
+        """
+        if not isinstance(raw_obs, dict):
+            return None
+        for group in raw_obs.values():
+            getter = getattr(group, "get", None)
+            if getter is None:
+                continue
+            value = getter(term_name)
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _get_env_gt_state(raw_obs: Any, env_id: int) -> dict | None:
+        """Return this env's ground-truth state snapshot, or None.
+
+        ``run_episode`` attaches ``obs["gt_state"] = {env_id: state}`` when
+        ``--enable-gt-state`` is set (schema: ``robolab/eval/gt_state.py``).
+        """
+        gt_state = raw_obs.get("gt_state") if isinstance(raw_obs, dict) else None
+        if isinstance(gt_state, dict) and env_id in gt_state:
+            return gt_state[env_id]
+        return None
+
+    @staticmethod
+    def _to_numpy(value: Any, env_id: int = 0) -> np.ndarray:
+        """Convert a batched tensor/array to NumPy, selecting one env's row."""
+        if hasattr(value, "detach"):
+            return value[env_id].detach().cpu().numpy()
+        array = np.asarray(value)
+        return array[env_id] if array.ndim > 0 else array
 
     # ------------------------------------------------------------------
     # Optional hooks

@@ -75,7 +75,14 @@ class MyPolicyClient(InferenceClient):
 **Key contract:**
 - `_extract_observation` + `_pack_request` split repo-specific obs munging from backend-specific wire format. The ABC's default `infer()` wires them together: extract → pack → query → unpack → postprocess → cache chunk → step one action.
 - Action dict returned by `infer()` has `"action"` (numpy array, typically 8-dim: 7 joints + 1 gripper) and `"viz"` (image for the live display window, or `None`).
-- `reset(env_id=...)` clears per-episode state. Override only if your server needs session notification; otherwise the base's default is enough.
+- `reset(env_id=...)` clears per-episode state; `begin_episode(episode_idx)` is called before each episode starts. Override either only if your server needs session notification; otherwise the base's defaults are enough.
+- There is no central registry or factory — each runner imports its client class directly and constructs it inline:
+
+```python
+from my_policy.inference_client import MyPolicyClient
+
+client = MyPolicyClient(remote_host="localhost", remote_port=8000)
+```
 
 See the [existing clients](#existing-clients-as-reference) for complete working examples.
 
@@ -120,12 +127,16 @@ In short:
 
 5. **View results**: Results are saved to `output/<timestamp>_my_policy/`. See [Analysis and Results Parsing](analysis.md) for summarization tools.
 
+## Optional: Ground-Truth State in Your Client
+
+If your client (or the server behind it) wants privileged simulator state — object poses, gripper contacts, live subtask progress — run with `--enable-gt-state`. The episode loop then attaches `obs["gt_state"] = {env_id: state}` (one entry per active env, once per environment step) to the observation your `_extract_observation` receives. The base class provides generic helpers to read it: `self._get_env_gt_state(raw_obs, env_id)` returns your env's entry, `self._find_obs_term(raw_obs, name)` looks up any observation term by name across groups (e.g. depth or camera-calibration terms), and `self._to_numpy(value, env_id)` selects one env's row as numpy. Each client reads only its own env's entry, so multi-env evaluations stay independent.
+
+The state is a *raw snapshot*: object poses and velocities, end-effector pose, gripper closedness, gripper contacts, and the subtask recorder's per-object/per-condition tracking. Frames are uniform — positions in meters in the env-local frame (world minus env origin), quaternions world-frame `(w, x, y, z)`, velocities world-frame — and everything is plain numpy, msgpack-serialisable. Full schema: [Running Environments — Ground-Truth State Export](environment_run.md#ground-truth-state-export).
+
+Derived quantities (e.g. "was this object lifted", "is the gripper grasping something") are deliberately not part of the snapshot — thresholds and heuristics are the consumer's business. Accumulate them client-side from the per-step stream; `_extract_observation` runs every environment step, even on steps where a cached action chunk skips the server round-trip, so client-side tracking never misses a step.
+
+Separately from the inference-time channel, environments can be registered with `object_state_obs=True` (on `auto_register_droid_envs`) to add a per-task `object_state_obs` observation group with `<object>_pos` / `<object>_quat` / `<object>_vel` terms (same frame conventions) generated from the task's `contact_object_list` — ground-truth object state through the standard observation pipeline, for consumers that want it batched, recorded, and replayable like any other observation.
+
 ## Existing Clients as Reference
 
-| Client | Protocol | File |
-|--------|----------|------|
-| Pi0 / Pi0-fast / Pi05 / Paligemma / Paligemma-fast | WebSocket (OpenPI) | `policies/pi0_family/client.py` |
-| GR00T | ZMQ | `policies/gr00t/client.py` |
-| DreamZero | WebSocket (msgpack) | `policies/dreamzero/client.py` |
-
-See [Inference Clients](inference.md) for server setup instructions.
+See [Inference Clients](../policies/README.md) for server setup instructions.

@@ -34,6 +34,8 @@ env.close()
 | `events` | `dict` or configclass | `None` | Event configuration to merge into the environment (e.g., pose randomization, camera variation) |
 | `instruction_type` | `str` | `"default"` | Instruction variant to use when the task defines multiple variants |
 | `policy` | `str` | `None` | Policy backend name, stored on `env_cfg` for downstream use |
+| `renderer` | `str` | `"realtime"` | RTX renderer: `"realtime"` (RaytracedLighting) or `"pathtracing"` (PathTracing). Recorded in `env_cfg.json` (see [Renderer Selection](#renderer-selection)) |
+| `rendering_mode` | `str` | `None` | Realtime quality preset (`"performance"`, `"balanced"`, `"quality"`); `None` leaves IsaacLab's default (`balanced`) |
 | `eye` | `tuple` | `None` | Camera eye position override |
 | `lookat` | `tuple` | `None` | Camera look-at position override |
 
@@ -375,14 +377,28 @@ The built-in `policies/pi0_family/run.py` supports the full set of evaluation fe
 | `--remote-host HOST` | Policy server host | `localhost` |
 | `--remote-port PORT` | Policy server port | `8000` |
 | `--output-folder-name NAME` | Output folder under `output/`. Reusing a previous folder skips completed episodes. | `<timestamp>_<policy>` |
-| `--enable-subtask` | Enable subtask progress checking (records score, reason, subtask log) | `False` |
+| `--disable-subtask` | Disable subtask progress checking (drops score, reason, subtask log from results; tracking is on by default) | `False` |
+| `--enable-gt-state` | Export per-env ground-truth simulator state to the inference client each step (`obs["gt_state"] = {env_id: state}`). See [Ground-Truth State Export](#ground-truth-state-export). | `False` |
 | `--record-image-data` | Record image observations to HDF5 | `False` |
 | `--video-mode MODE` | Which videos to save: `all` (sensor + viewport), `viewport` only, `sensor` only, or `none` | `all` |
+| `--renderer MODE` | RTX renderer: `realtime` (RaytracedLighting) or `pathtracing` (PathTracing). See [Renderer Selection](#renderer-selection). | `realtime` |
+| `--rendering-type MODE` | Realtime quality preset: `performance`, `balanced`, or `quality`. No effect under `--renderer pathtracing`. | IsaacLab default (`balanced`) |
 | `--randomize-background` | Sample a random non-default background per task at registration time. The chosen texture is recorded in each task's `env_cfg.json`. See [Backgrounds — Per-Run Random Background per Task](background.md#per-run-random-background-per-task). | `False` |
 | `--background-seed N` | Seed for reproducible per-task background sampling. Used with `--randomize-background`. | `None` |
 | `--headless` | Run without live display window. **Recommended for multi-task runs** — see [GPU VRAM leak in non-headless mode](debug.md#gpu-vram-leak-in-non-headless-mode-across-environment-reloads) | `False` |
 | `--enable-verbose` | Verbose output | `False` |
 | `--enable-debug` | Debug output | `False` |
+
+### Renderer Selection
+
+Both `--renderer` modes are RTX renderers; the flag selects which one IsaacLab configures via [`RenderCfg`](https://isaac-sim.github.io/IsaacLab/main/source/api/lab/isaaclab.sim.html#isaaclab.sim.RenderCfg) (it sets the `/rtx/rendermode` carb value).
+
+- **`realtime`** (`RaytracedLighting`) — the default. Fast, deterministic per frame, and compatible with the tiled multi-env cameras the eval pipeline uses. This is what you want for evaluation.
+- **`pathtracing`** (`PathTracing`) — a physically-based renderer with accurate global illumination, ambient occlusion, and soft shadows. It accumulates samples over successive frames, converging on a *static* scene.
+
+> **Path tracing does affect the eval cameras.** It applies to the tiled `TiledCamera` sensors used for observations and viewport video, not just standalone captures — verified on a settled `num_envs=1` scene, where the tiled viewport output differs from realtime in a GI-consistent way (contact shadows, ambient occlusion, material response), not as noise. Two caveats remain: (1) PT accumulates samples on a *static* scene, so during a moving rollout — where the arm and objects change every frame — per-frame convergence drops and frames can be noisier than a settled capture; (2) it is substantially slower than realtime. So realtime stays the default and recommended renderer for large-N evaluation, while path tracing suits higher-fidelity or slow/static captures. The cleanest path-traced stills come from the standalone-viewport tools `misc/compare_renderers.py` and `misc/capture_scene_image.py`, which accumulate on a frozen scene.
+
+`--rendering-type` is a quality preset for the realtime renderer only. The resolved renderer is recorded in every run's `env_cfg.json` (top-level `renderer`, plus `sim.render.carb_settings["/rtx/rendermode"]`) for provenance. For the underlying settings, see the [Omniverse RTX Renderer documentation](https://docs.omniverse.nvidia.com/materials-and-rendering/latest/rtx-renderer.html).
 
 **Examples:**
 
@@ -396,17 +412,20 @@ python policies/pi0_family/run.py --task BananaInBowlTask RubiksCubeTask
 # Run tasks by tag
 python policies/pi0_family/run.py --tag pick_place
 
-# Run 20 parallel episodes with subtask tracking
-python policies/pi0_family/run.py --headless --num_envs 20 --enable-subtask
+# Run 20 parallel episodes
+python policies/pi0_family/run.py --headless --num_envs 20
 
 # If 20 envs don't fit in GPU memory, split into runs:
-python policies/pi0_family/run.py --headless --num_envs 10 --num-runs 2 --enable-subtask
+python policies/pi0_family/run.py --headless --num_envs 10 --num-runs 2
 
 # Use a different policy backend (each lives under policies/<policy>/run.py)
 python policies/gr00t/run.py --remote-host 10.0.0.1 --remote-port 5555
 
 # Use a specific instruction variant
 python policies/pi0_family/run.py --task BananaInBowlTask --instruction-type vague
+
+# Render with the path tracer (standalone viewport only; see Renderer Selection)
+python policies/pi0_family/run.py --task BananaInBowlTask --renderer pathtracing
 
 # Resume a previous run (skips completed episodes automatically)
 python policies/pi0_family/run.py --output-folder-name 2026-01-24_15-35-59_pi05
@@ -422,8 +441,39 @@ The built-in `run_eval.py` provides several features out of the box:
 - **Trajectory metrics** — At the end of each episode, trajectory metrics (SPARC smoothness, path length, speed, joint tracking error) are computed from the HDF5 data and written directly into `episode_results.jsonl`. See [Data Storage — Episode Results](data.md#episode-results) for the full list.
 - **Error event extraction** — Error events (wrong object grabbed, gripper hit table, object dropped, etc.) are extracted from the episode log and recorded in the results.
 - **Video recording** — Two videos per episode: observation camera view and viewport camera view, saved to the task output directory.
-- **Subtask tracking** — With `--enable-subtask`, subtask completion scores and reasons are recorded per episode.
+- **Subtask tracking** — On by default: subtask completion scores and reasons are recorded per episode (`score`/`reason` in `episode_results.jsonl`, synced with the HDF5 `subtask/score` dataset and the per-env event log). Disable with `--disable-subtask`.
 - **Result summarization** — After all tasks complete, a summary table is printed. For more detailed analysis, see [Analysis and Results Parsing](analysis.md).
+
+## Ground-Truth State Export
+
+With `--enable-gt-state`, the episode loop attaches privileged simulator state to the observation dict once per environment step (the policy rate — after decimated physics substeps), keyed per env:
+
+```python
+obs["gt_state"] = {env_id: state}   # one entry per active env
+```
+
+Clients read their own env's entry (the `InferenceClient._get_env_gt_state` helper), so multi-env evaluations stay independent. The per-env `state` is a raw snapshot produced by `GroundTruthStateExporter` (`robolab/eval/gt_state.py`); everything is plain numpy and msgpack-serialisable:
+
+| Key | Contents |
+|-----|----------|
+| `objects.<name>.pos` | `(3,)` float32, **env-local frame** (world minus env origin), meters |
+| `objects.<name>.quat` | `(4,)` float32, **world frame**, `(w, x, y, z)` |
+| `objects.<name>.vel` | `(6,)` float32, world-frame linear (m/s) + angular (rad/s) |
+| `robot.ee_pos` / `robot.ee_quat` | End-effector pose, same conventions as above |
+| `robot.gripper_closedness` | float32 in `[0, 1]`, 0 = open, 1 = closed |
+| `robot.objects_in_contact` | `list[str]` — objects touching the gripper per the contact sensor |
+| `subtask.completed` / `.total` / `.score` / `.info` | Live subtask-recorder tracking for this env |
+| `subtask.conditions` | Per-object condition satisfaction rows for the current subtask |
+| `subtask.object_completed` | `{object: bool}` across the current and all past subtasks |
+| `subtask.all_subtask_conditions` | `{"subtask_i": bool}` — every subtask's conditions re-evaluated against the live sim each step |
+| `scene_objects` | Manipulable object names (the task's `contact_object_list` minus fixtures) |
+| `step` | Environment steps since episode start |
+
+One object entry exists per element of the task's `contact_object_list` (minus the `table`/`robot` fixtures). Objects are covered per env — each env's entry reflects that env's own poses, contacts, and subtask progress.
+
+The snapshot is deliberately raw: derived quantities (lift thresholds, grasp heuristics) are the consumer's business, computed client-side from the per-step stream; see [Evaluating a New Policy — Ground-Truth State in Your Client](policy.md#optional-ground-truth-state-in-your-client).
+
+**Ground truth through the observation pipeline.** Independently of `--enable-gt-state`, environments can be registered with `object_state_obs=True` (an argument to `auto_register_droid_envs`, not a CLI flag) to add an `object_state_obs` observation group with `<object>_pos` / `<object>_quat` / `<object>_vel` terms per task — same frame conventions, but batched, recorded to HDF5, and replayable like any other observation. Useful for consumers that want privileged object state inside the standard pipeline rather than on the inference side-channel.
 
 ## Robustness Evaluation Scripts
 

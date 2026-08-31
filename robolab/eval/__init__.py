@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """Evaluation orchestration: episode runner, inference ABC, summarize helpers,
 plus shared argparse / per-task-loop helpers for the per-policy runner scripts
@@ -21,12 +21,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .base_client import InferenceClient
     from .episode import run_episode, run_forked_episode
+    from .gt_state import GroundTruthStateExporter
     from .runner import add_common_eval_args, run_evaluation
     from .screen_to_world import identify_clicked_object
     from .state_restoration import load_state_at_timestep, restore_scene_state
     from .summarize import summarize_run
 
 __all__ = [
+    "GroundTruthStateExporter",
     "InferenceClient",
     "add_common_eval_args",
     "identify_clicked_object",
@@ -44,6 +46,10 @@ def __getattr__(name: str):
         from .base_client import InferenceClient
 
         return InferenceClient
+    if name == "GroundTruthStateExporter":
+        from .gt_state import GroundTruthStateExporter
+
+        return GroundTruthStateExporter
     if name == "run_episode":
         from .episode import run_episode
 

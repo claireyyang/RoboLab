@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """
 Environment factory for automatically creating and managing task environments.
@@ -337,13 +337,14 @@ class EnvFactory:
         if tasks is not None:
             task_list = tasks if isinstance(tasks, list) else [tasks]
             print(f"\033[96m[RoboLab] Registering {len(task_list)} task(s): {task_list}\033[0m")
-            return {
-                (Path(t).stem if ('/' in t or '\\' in t) else t):
-                    self.create_env_cfg(
-                        t, tags=add_tags, env_prefix=env_prefix, env_postfix=env_postfix, **env_kwargs
-                    )
-                for t in task_list
-            }
+            return self.batch_create_env_cfgs(
+                task_list,
+                tags=add_tags,
+                task_subdirs=task_subdirs,
+                env_prefix=env_prefix,
+                env_postfix=env_postfix,
+                **env_kwargs,
+            )
 
         total_start = time.time()
 

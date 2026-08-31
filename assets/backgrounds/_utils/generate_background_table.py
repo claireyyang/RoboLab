@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import json
 import os
@@ -221,7 +221,12 @@ def generate_markdown_from_data(background_data, folder_path, output_md="README.
     # Generate title and description
     timestamp = datetime.fromisoformat(background_data["metadata"]["generated_at"]).strftime("%Y-%m-%d %H:%M:%S")
     title = "Background Assets"
-    description = f"For `outdoor` backgrounds, download them [here](https://drive.google.com/file/d/1ldbQ3n4rCYwtEeDeqf-Rtujq9n94VFiL/view?usp=sharing)(~2GB). This table was generated automatically from {background_data['metadata']['total_backgrounds']} backgrounds. Last updated: {timestamp}"
+    description = (
+        f"RoboLab ships a small curated set of indoor HDRI backgrounds. Any HDR/EXR environment map works — "
+        f"for more variety (including outdoor environments), download CC0 HDRIs from [Poly Haven](https://polyhaven.com/hdris) "
+        f"and reference them by path (see [docs/background.md](../../docs/background.md)). "
+        f"This table was generated automatically from {background_data['metadata']['total_backgrounds']} backgrounds. Last updated: {timestamp}"
+    )
 
     # Use csv_utils save_markdown_table or fallback
     if save_markdown_table is not None:

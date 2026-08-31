@@ -1,15 +1,135 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 from typing import Any, List
 
 import isaaclab.envs.mdp as mdp
 import numpy as np
+import torch
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
+
+
+def _image_observation_func():
+    """Resolve the IsaacLab image observation function across versions.
+
+    IsaacLab 2.2 (IsaacSim 5.0) exposes it as ``mdp.observations.image``;
+    IsaacLab 2.3 (IsaacSim 5.1) also exposes it directly as ``mdp.image``.
+    Prefer the direct attribute, then fall back to the nested module.
+    """
+    image_func = getattr(mdp, "image", None)
+    if image_func is not None:
+        return image_func
+    observations = getattr(mdp, "observations", None)
+    image_func = getattr(observations, "image", None) if observations is not None else None
+    if image_func is None:
+        raise AttributeError("IsaacLab image observation function not found")
+    return image_func
+
+
+def image_safe(
+    env: Any,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("over_shoulder_left_camera"),
+    data_type: str = "rgb",
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Read a camera image, tolerating the first pre-render manager query.
+
+    With lazy sensor updates disabled, annotators such as ``depth`` are only
+    populated after the first render. Return a correctly shaped-and-typed zero
+    image until then so the observation manager can size its buffers.
+    """
+    sensor = env.scene.sensors[sensor_cfg.name]
+    if data_type not in sensor.data.output:
+        channels = 3 if data_type == "rgb" else 1
+        dtype = torch.float32 if (normalize or data_type != "rgb") else torch.uint8
+        return torch.zeros(
+            (env.num_envs, sensor.cfg.height, sensor.cfg.width, channels),
+            device=env.device,
+            dtype=dtype,
+        )
+    return _image_observation_func()(
+        env, sensor_cfg=sensor_cfg, data_type=data_type, normalize=normalize
+    )
+
+
+def camera_pos(env: Any, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Camera position, env-local frame (world minus env origin), meters. Shape (num_envs, 3)."""
+    sensor = env.scene.sensors[sensor_cfg.name]
+    return sensor.data.pos_w - env.scene.env_origins
+
+
+def camera_quat(env: Any, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Camera orientation, world frame, OpenGL convention, (w, x, y, z). Shape (num_envs, 4)."""
+    sensor = env.scene.sensors[sensor_cfg.name]
+    return sensor.data.quat_w_opengl
+
+
+def camera_intrinsics(env: Any, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Camera intrinsic matrix K in pixels. Shape (num_envs, 3, 3)."""
+    sensor = env.scene.sensors[sensor_cfg.name]
+    matrices = getattr(sensor.data, "intrinsic_matrices", None)
+    if matrices is None:
+        return torch.zeros((env.num_envs, 3, 3), device=env.device, dtype=torch.float32)
+    return matrices
+
+
+def object_pos(env: Any, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Object root position, env-local frame (world minus env origin), meters. Shape (num_envs, 3)."""
+    asset = env.scene[asset_cfg.name]
+    return asset.data.root_pos_w - env.scene.env_origins
+
+
+def object_quat(env: Any, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Object root orientation, world frame, (w, x, y, z). Shape (num_envs, 4)."""
+    return env.scene[asset_cfg.name].data.root_quat_w
+
+
+def object_vel(env: Any, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Object root velocity, world frame, linear (m/s) + angular (rad/s). Shape (num_envs, 6)."""
+    return env.scene[asset_cfg.name].data.root_vel_w
+
+
+def generate_object_state_obs(object_names: List[str]):
+    """Create an observation group with ground-truth state terms per object.
+
+    Each object gets ``<name>_pos`` (env-local meters), ``<name>_quat``
+    (world-frame w, x, y, z), and ``<name>_vel`` (world-frame linear+angular)
+    terms, evaluated once per environment step like any other observation.
+    Opt in at registration time via ``object_state_obs=True`` on
+    ``auto_register_droid_envs`` / ``generate_task_env_cfg`` — the object
+    list then comes from the task's ``contact_object_list``.
+
+    Args:
+        object_names: Scene entity names to observe (rigid objects or
+            articulations with a root state).
+
+    Returns:
+        A dynamically generated observation group class (ObsGroup subclass).
+    """
+    obs_terms = {}
+    for name in object_names:
+        for suffix, func in (("pos", object_pos), ("quat", object_quat), ("vel", object_vel)):
+            obs_terms[f"{name}_{suffix}"] = ObsTerm(
+                func=func,
+                params={"asset_cfg": SceneEntityCfg(name)},
+            )
+
+    @configclass
+    class DynamicObjectStateObsCfg(ObsGroup):
+        """Dynamically generated ground-truth object-state observations."""
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = False
+
+    for term_name, obs_term in obs_terms.items():
+        setattr(DynamicObjectStateObsCfg, term_name, obs_term)
+
+    return DynamicObjectStateObsCfg
 
 
 def generate_image_obs_from_cameras(camera_cfgs: List[Any] | Any):
@@ -59,13 +179,35 @@ def generate_image_obs_from_cameras(camera_cfgs: List[Any] | Any):
                 # if hasattr(attr_value, 'prim_path'):
                     camera_name = attr_name
                     obs_terms[camera_name] = ObsTerm(
-                        func=mdp.observations.image,
+                        func=_image_observation_func(),
                         params={
                             "sensor_cfg": SceneEntityCfg(camera_name),
                             "data_type": "rgb",
                             "normalize": False,
                         }
                     )
+                    # Cameras that render depth (see robolab.variations.camera.with_depth)
+                    # also get <camera>_depth plus pose/intrinsics metadata terms, so
+                    # calibration flows through the standard observation pipeline
+                    # (per-env, recorded like any other term).
+                    if "depth" in attr_value.data_types:
+                        obs_terms[f"{camera_name}_depth"] = ObsTerm(
+                            func=image_safe,
+                            params={
+                                "sensor_cfg": SceneEntityCfg(camera_name),
+                                "data_type": "depth",
+                                "normalize": False,
+                            }
+                        )
+                        for term_suffix, term_func in (
+                            ("pos", camera_pos),
+                            ("quat", camera_quat),
+                            ("K", camera_intrinsics),
+                        ):
+                            obs_terms[f"{camera_name}_{term_suffix}"] = ObsTerm(
+                                func=term_func,
+                                params={"sensor_cfg": SceneEntityCfg(camera_name)},
+                            )
 
     # Create the dynamic image observation group class
     @configclass

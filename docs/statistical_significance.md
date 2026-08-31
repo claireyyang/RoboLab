@@ -7,8 +7,7 @@ Most RoboLab eval runs report a per-task success rate `k / n` over a fixed numbe
 Every per-policy runner under `policies/<policy>/run.py` can use the same Beta posterior to decide *when to stop* running episodes for a task. Enable it with `--num-episodes-adaptive`:
 
 ```bash
-python policies/pi0_family/run.py --policy pi05 --num-envs 50 --num-episodes-adaptive 200
-python policies/dreamzero/run.py  --num-envs 50 --num-episodes-adaptive 200 --remote-uri wss://host/
+python policies/<policy>/run.py --num-envs 50 --num-episodes-adaptive 200
 ```
 
 When `--num-episodes-adaptive MAX_N` is set:
@@ -76,5 +75,5 @@ if should_continue_sampling(k, n, target_width=0.14, n_min=10, n_max=200):
 
 - [Analysis and Results Parsing](analysis.md) — `read_results.py` and the `95% CI` column it prints
 - [Running Environments](environment_run.md) — Full CLI reference for the per-policy runners under `policies/<policy>/run.py`
-- [Policy backends](policy.md) — DreamZero uses `policies/dreamzero/run.py`
+- [Policy backends](policy.md) — per-policy runners live under `policies/<policy>/run.py`
 - [TRI LBM paper (arXiv:2507.05331)](https://arxiv.org/abs/2507.05331) — Source of the 200-rollout sim / 50-rollout real evaluation protocol our defaults follow

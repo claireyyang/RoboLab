@@ -1,9 +1,35 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
+
+import copy
 
 import isaaclab.sim as sim_utils
-from isaaclab.sensors import TiledCameraCfg
+from isaaclab.sensors import CameraCfg, TiledCameraCfg
 from isaaclab.utils import configclass
+
+
+def with_depth(camera_cfg_cls):
+    """Return a variant of ``camera_cfg_cls`` whose cameras also render depth.
+
+    Builds a subclass with each contained camera's ``data_types`` extended by
+    ``"depth"``, leaving the original class untouched so registrations without
+    depth keep their rgb-only render cost. Camera attribute names (and thus
+    prim paths and observation term names) are unchanged.
+    """
+    instance = camera_cfg_cls()
+    overrides = {}
+    for attr_name in dir(instance):
+        if attr_name.startswith("_"):
+            continue
+        attr_value = getattr(instance, attr_name)
+        if isinstance(attr_value, CameraCfg) and "depth" not in attr_value.data_types:
+            camera = copy.deepcopy(attr_value)
+            camera.data_types = [*camera.data_types, "depth"]
+            overrides[attr_name] = camera
+    if not overrides:
+        return camera_cfg_cls
+    variant = type(f"{camera_cfg_cls.__name__}WithDepth", (camera_cfg_cls,), overrides)
+    return configclass(variant)
 
 
 @configclass

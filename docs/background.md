@@ -21,10 +21,11 @@ RoboLab ships HDR/EXR background assets in `assets/backgrounds/` organized by ca
 ```
 assets/backgrounds/
 ├── default/          # Default backgrounds
-├── indoors/          # Indoor environments
-├── outdoors/         # Outdoor environments
+├── indoors/          # Curated indoor environments
 └── _utils/           # Background management scripts
 ```
+
+Only a small curated set ships with the repo. For more variety — including outdoor environments — any HDR/EXR environment map from [Poly Haven](https://polyhaven.com/hdris) (CC0) works; see [Using Your Own HDR/EXR Files](#using-your-own-hdrexr-files).
 
 ### Pre-defined Background Configs
 

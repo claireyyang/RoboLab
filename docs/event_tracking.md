@@ -22,4 +22,17 @@ Events are returned as `(info_string, StatusCode)` tuples, where the info string
 | **OBJECT_TIPPED_OVER** | An object that should remain upright has fallen over |
 | **TARGET_OBJECT_DROPPED** | Target object was successfully grasped but released mid-transport |
 | **GRIPPER_HIT_OBJECT** | Gripper collided with a non-target object |
-| **MULTIPLE_OBJECTS_GRABBED** | Gripper is in contact with multiple objects simultaneously |
+| **MULTIPLE_OBJECTS_GRABBED** | A single gripper is in contact with multiple objects simultaneously |
+
+### Multi-gripper robots
+
+Contact events resolve gripper names through the robot's `contact_gripper` declaration
+(see [Robots](robots.md#contact-gripper)), and the two contact events treat the
+`"gripper"` alias group differently on purpose:
+
+- **GRIPPER_HIT_OBJECT** uses the group as-is: touching a non-target object with *any*
+  gripper is a hit, whichever hand did it.
+- **MULTIPLE_OBJECTS_GRABBED** is evaluated **per concrete gripper**: the violation is one
+  gripper clutching several objects at once. Contacts are counted separately for each
+  member of the group, so a bimanual robot holding one object in each hand does not
+  trigger it — but either hand individually touching two objects does.

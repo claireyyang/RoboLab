@@ -157,6 +157,15 @@ uv run pytest tests/test_tasks_valid.py -v                 # all tasks
 uv run pytest tests/test_tasks_valid.py -v -k BananaInBowl # one task
 ```
 
+### Run one full episode
+
+Run a single empty-action episode end-to-end (useful for confirming a task launches and terminates correctly):
+
+```bash
+uv run pytest tests/test_run_empty.py -v                   # default: BananaInBowlTask
+uv run pytest tests/test_run_empty.py -v --task RubiksCubeTask
+```
+
 ### Verify IsaacLab installation
 
 Minimal smoke test that IsaacLab and IsaacSim launch correctly:

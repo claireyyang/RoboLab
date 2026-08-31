@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import os
 from datetime import datetime
@@ -75,7 +75,7 @@ def get_timestamp():
 DEBUG = False
 VERBOSE = False
 VISUALIZE = False
-ENABLE_SUBTASK_PROGRESS_CHECKING = False
+ENABLE_SUBTASK_PROGRESS_CHECKING = True
 RECORD_IMAGE_DATA = False
 DEVICE = "cuda:0"
 

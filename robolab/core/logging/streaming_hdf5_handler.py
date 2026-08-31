@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """Streaming HDF5 dataset file handler that supports incremental writing with multiple concurrent episodes."""
 
 import atexit
+import importlib.metadata
 import json
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import h5py
 import numpy as np
@@ -89,11 +91,7 @@ class StreamingHDF5DatasetFileHandler(DatasetFileHandlerBase):
                 print(f"\033[93m[StreamingHDF5] WARNING: Removing corrupt file and creating a new one: {file_path}\033[0m")
                 os.remove(file_path)
                 self._hdf5_file_stream = h5py.File(file_path, "w")
-                self._hdf5_data_group = self._hdf5_file_stream.create_group("data")
-                self._hdf5_data_group.attrs["total"] = 0
-                self._demo_count = 0
-                env_name = env_name if env_name is not None else ""
-                self.add_env_args({"env_name": env_name, "type": 2})
+                self._init_data_group(env_name)
                 return
 
             if "data" in self._hdf5_file_stream:
@@ -104,18 +102,28 @@ class StreamingHDF5DatasetFileHandler(DatasetFileHandlerBase):
                 if "env_args" in self._hdf5_data_group.attrs:
                     self._env_args = json.loads(self._hdf5_data_group.attrs["env_args"])
             else:
-                self._hdf5_data_group = self._hdf5_file_stream.create_group("data")
-                self._hdf5_data_group.attrs["total"] = 0
-                self._demo_count = 0
-                env_name = env_name if env_name is not None else ""
-                self.add_env_args({"env_name": env_name, "type": 2})
+                self._init_data_group(env_name)
         else:
             self._hdf5_file_stream = h5py.File(file_path, "w")
-            self._hdf5_data_group = self._hdf5_file_stream.create_group("data")
-            self._hdf5_data_group.attrs["total"] = 0
-            self._demo_count = 0
-            env_name = env_name if env_name is not None else ""
-            self.add_env_args({"env_name": env_name, "type": 2})
+            self._init_data_group(env_name)
+
+    def _init_data_group(self, env_name: str | None):
+        """Create the ``data`` group in a fresh file and stamp recording provenance.
+
+        The provenance attrs (simulator stack versions and recording date) let
+        replay tooling warn when a recording is replayed on a different
+        IsaacSim/IsaacLab stack, whose contact mechanics differ.
+        """
+        self._hdf5_data_group = self._hdf5_file_stream.create_group("data")
+        self._hdf5_data_group.attrs["total"] = 0
+        self._demo_count = 0
+        self.add_env_args({"env_name": env_name if env_name is not None else "", "type": 2})
+        for package in ("isaaclab", "isaacsim"):
+            try:
+                self._hdf5_data_group.attrs[f"{package}_version"] = importlib.metadata.version(package)
+            except importlib.metadata.PackageNotFoundError:
+                pass
+        self._hdf5_data_group.attrs["recorded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     def __del__(self):
         self.close()
@@ -373,6 +381,33 @@ class StreamingHDF5DatasetFileHandler(DatasetFileHandlerBase):
     # Internal helpers
     # ========================================================================
 
+    # Keys already warned about to avoid per-step log spam.
+    _warned_nontensor_keys: set = set()
+
+    @staticmethod
+    def _leaf_to_numpy(group, key, value):
+        """Convert a recorder leaf value to a numpy array for HDF5 storage.
+
+        Leaves are normally CUDA/CPU torch tensors, but on the IsaacSim 5.1 /
+        IsaacLab 2.3 stack some ``initial_state`` leaves arrive as Python lists
+        (or lists of tensors) rather than a single stacked tensor. Coerce those
+        so export doesn't crash with ``'list' object has no attribute 'cpu'``.
+        """
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+
+        # Dedup the warning across demos: group.name carries a per-episode
+        # ".../demo_N/..." segment, so key on the field path with that stripped.
+        field_path = "/".join(p for p in f"{group.name}/{key}".split("/") if not p.startswith("demo_"))
+        if field_path not in StreamingHDF5DatasetFileHandler._warned_nontensor_keys:
+            StreamingHDF5DatasetFileHandler._warned_nontensor_keys.add(field_path)
+            print(f"[StreamingHDF5] non-tensor recorder leaf at {field_path}: "
+                  f"type={type(value).__name__}; coercing to numpy.")
+
+        if isinstance(value, (list, tuple)) and len(value) > 0 and isinstance(value[0], torch.Tensor):
+            return torch.stack(list(value)).detach().cpu().numpy()
+        return np.asarray(value)
+
     @staticmethod
     def _append_to_dataset(group, key, value, datasets_cache):
         """Append data to a resizable HDF5 dataset, creating it if needed."""
@@ -386,7 +421,7 @@ class StreamingHDF5DatasetFileHandler(DatasetFileHandlerBase):
                     key_group, sub_key, sub_value, datasets_cache
                 )
         else:
-            np_data = value.cpu().numpy()
+            np_data = StreamingHDF5DatasetFileHandler._leaf_to_numpy(group, key, value)
             cache_key = f"{group.name}/{key}"
 
             if cache_key in datasets_cache:

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // RoboLab eval dashboard frontend.
 // Single-page: sidebar tree (runs → tasks → episodes) + main pane that swaps
 // between benchmark/run/task/episode views.

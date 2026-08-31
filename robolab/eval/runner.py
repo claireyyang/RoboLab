@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """Shared evaluation driver: argparse helpers + per-task run loop.
 
@@ -71,8 +71,16 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
                               "(0, 1]) for adaptive sampling. Default 0.14 = worst-case CI "
                               "width at n=200 (TRI LBM sim protocol, arXiv:2507.05331). "
                               "Only used when --num-episodes-adaptive is set."))
-    parser.add_argument("--enable-subtask", "--enable_subtask", action="store_true",
-                        help="Enable subtask progress checking (default: False).")
+    parser.add_argument("--enable-subtask", "--enable_subtask", dest="enable_subtask",
+                        action="store_true", default=True,
+                        help="Enable subtask progress checking (default: on; kept for "
+                             "backward compatibility).")
+    parser.add_argument("--disable-subtask", "--disable_subtask", dest="enable_subtask",
+                        action="store_false",
+                        help="Disable subtask progress checking (episode results will "
+                             "have no score/reason and an empty events log).")
+    parser.add_argument("--enable-gt-state", "--enable_gt_state", action="store_true",
+                        help="Export simulator ground-truth state to the policy client.")
     parser.add_argument("--output-folder-name", "--output_folder_name", type=str, default=None,
                         help=("Output folder name under <repo>/output. Default is "
                               "<timestamp>_<policy>. If you provide the output folder name "
@@ -85,6 +93,23 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
                         choices=["all", "viewport", "sensor", "none"],
                         help=("Which videos to save: 'all' (sensor + viewport), "
                               "'viewport' only, 'sensor' only, or 'none' (default: all)."))
+    parser.add_argument("--renderer", type=str, default="realtime",
+                        choices=["realtime", "pathtracing"],
+                        help=("RTX renderer mode (default: realtime). 'realtime' uses "
+                              "the RaytracedLighting interactive renderer; 'pathtracing' "
+                              "uses the offline path tracer (higher fidelity but much "
+                              "slower — intended for beauty/demo renders, not large-N "
+                              "eval). Sets carb '/rtx/rendermode'."))
+    # NOTE: named --rendering-type (not --rendering-mode) on purpose. Isaac Lab's
+    # AppLauncher.add_app_launcher_args() reserves the dest `rendering_mode` on some
+    # versions (e.g. 2.2.0 in the OSMO eval image) and raises if the parser already
+    # defines it. Using a distinct dest avoids that collision regardless of arg order.
+    parser.add_argument("--rendering-type", "--rendering_type", type=str, default=None,
+                        choices=["performance", "balanced", "quality"],
+                        help=("Realtime renderer quality preset (maps to IsaacLab "
+                              "RenderCfg.rendering_mode). Default: unset, which lets "
+                              "IsaacLab fall back to 'balanced'. No effect under "
+                              "--renderer pathtracing."))
 
 
 def run_evaluation(
@@ -182,7 +207,16 @@ def run_evaluation(
             num_envs=num_envs,
             instruction_type=args.instruction_type,
             policy=policy,
+            renderer=args.renderer,
+            rendering_mode=args.rendering_type,
         )
+
+        if robolab.constants.ENABLE_SUBTASK_PROGRESS_CHECKING and getattr(env_cfg, "subtasks", None) is None:
+            print(
+                f"\033[93m[RoboLab] WARNING: Subtask tracking is enabled but task `{task_env}` "
+                f"has no subtask specification — subtask tracking is skipped for this task, so "
+                f"its episode results will have no score/reason and an empty events log.\033[0m"
+            )
 
         client = client_factory(args)
 
@@ -228,6 +262,7 @@ def run_evaluation(
                 save_videos=save_videos,
                 video_mode=args.video_mode,
                 headless=args.headless,
+                enable_gt_state=args.enable_gt_state,
             )
 
             episode_results = summarize_run(

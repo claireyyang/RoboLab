@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -9,6 +9,7 @@ from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransf
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
+from robolab.core.environments.scene_fixture import FRANKA_TABLE_FIXTURE
 from robolab.robots.franka_definitions import *  # noqa
 
 # Create a copy of the default frame marker config
@@ -132,6 +133,14 @@ class FrankaCfg:
             ),
         ],
     )
+
+
+# Class-level label, assigned after the class body so configclass does not turn
+# it into a config field. See docs/robots.md#table-fixture.
+FrankaCfg.table_fixture = FRANKA_TABLE_FIXTURE
+# EE-pose recorder channels (HDF5 channel name -> EE body name), consumed by
+# create_recorder_config.
+FrankaCfg.ee_recorder_bodies = {"ee_pose": "panda_hand"}
 
 # IsaacLab ContactSensor requires exactly one prim per env for filter_prim_paths_expr
 # (force_matrix_w) to work. panda_.*finger matches 2 bodies per env, breaking

@@ -16,6 +16,7 @@ __pycache__
 debug/*
 !debug/scripts/
 !debug/scripts/**
+debug/scripts/__pycache__/
 !debug/container_hulls/
 !debug/container_hulls/**
 docker-cache/
@@ -33,6 +34,16 @@ docs/doxygen/xml/*
 **/data/
 **/output/
 videos/
+misc/paper/last_frames/
 *.code-workspace
 pyrightconfig.json
+
 *.csv
+
+
+# Claude Code — local/runtime only
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+.claude/agents
+.claude/commands

@@ -8,6 +8,10 @@ assets/
 !assets/scenes/
 !assets/objects/
 output/
+robolab_output/
+.venv/
+.claude/
+debug/
 .git/
 .github/
 
@@ -29,3 +33,6 @@ docker/
 *.swp
 *.swo
 *~
+
+# OV and Kit caches
+.cache/

@@ -194,6 +194,17 @@ MyScene, contact_object_list = import_scene_and_contact_object_list("/path/to/sc
 
 3. **Write the terminations class.** Always include `time_out` and `success`. Set `require_gripper_detached=True` for any placement condition.
 
+   **Choosing `gripper_name`** (contact-based conditions): the value refers to the robot's
+   `contact_gripper` declaration (docs/robots.md#contact-gripper). Rules:
+   - Single-arm tasks: keep the default `"gripper"`. On multi-gripper robots it is declared
+     as a group meaning "any gripper", so the same task runs unchanged on all embodiments.
+   - Bimanual tasks targeting one hand: use that hand's label, e.g. `"gripper_name": "left"`.
+   - Both hands (or specific fingers) on the object simultaneously: pass a list —
+     `"gripper_name": ["left", "right"]` means ALL listed grippers in contact at once.
+   - Detachment (`require_gripper_detached`, `object_dropped`) always means "touching none
+     of the given grippers", for every form of `gripper_name`. Use the default `"gripper"`
+     for release checks.
+
 4. **Write instruction variants.** Default (clear), vague (ambiguous), specific (detailed). See [Instruction Variants](#instruction-variants).
 
 5. **Decompose into subtasks** if multi-step. Use `pick_and_place` for standard pick-and-place; use `Subtask` with `partial` for custom conditions. See [Subtasks](#subtask-decomposition).
@@ -310,9 +321,9 @@ After writing the task file, display the following **next steps** message to the
 
 Task file created! Here's what to do next:
 
-**1. Validate the task** — checks contact objects, terminations, and scene references:
+**1. Validate the task** — checks contact objects, terminations, and scene references (runs over every task in `robolab/tasks/benchmark/`, so the newly generated task is included; failures name the offending file):
 ```bash
-python scripts/check_tasks_valid.py --tasks-folder <tasks_folder>
+uv run pytest tests/test_tasks_valid.py
 ```
 
 **2. Update the task metadata registry** — regenerates JSON, CSV, and README table:

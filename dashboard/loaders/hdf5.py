@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """Extract per-episode time-series from a RoboLab data.hdf5.
 
@@ -25,7 +25,7 @@ _OBS_SIGNALS = (
     ("proprio_obs/ee_quat", "ee_quat"),
 )
 
-# Flat per-episode layout: episode-level datasets, no /obs group.
+# cosmos3-style layout: episode-level datasets, no /obs group.
 _FLAT_SIGNALS = ("ee_pose", "states", "bbox")
 
 # ee_pose/* gets surfaced as flat ee_<leaf> series.
@@ -124,8 +124,8 @@ def episode_timeseries(path: Path, episode_key: str, max_points: int = 400,
             arr = ep["actions"][...]
             if arr.ndim >= 2:
                 add("actions", arr)
-        # Flat per-episode datasets (ee_pose/bbox handled as groups via
-        # _EE_POSE_SIGNALS / object walks below; only `states` may be flat).
+        # cosmos3-style flat episode datasets (ee_pose/bbox handled as groups
+        # via _EE_POSE_SIGNALS / object walks below; only `states` may be flat).
         flat_states = ep.get("states")
         if isinstance(flat_states, h5py.Dataset) and flat_states.ndim >= 2:
             add("state", flat_states[...])

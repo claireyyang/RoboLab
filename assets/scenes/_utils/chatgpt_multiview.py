@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """
 Render BOP objects with PyVista and (optionally) generate ChatGPT descriptions.
 This gives nicer rasterisation than pyrender without needing an OpenGL context.

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """
 conditionals: "Does task condition Y hold for these objects?"
@@ -21,7 +21,7 @@ import torch
 import robolab.constants
 from robolab.core.task.decorators import atomic, composite
 from robolab.core.task.predicate_logic import *
-from robolab.core.task.predicate_logic import _and, _not
+from robolab.core.task.predicate_logic import _and, _not, gripper_detached
 from robolab.core.task.subtask import Subtask
 from robolab.core.world.world_state import get_world
 
@@ -67,6 +67,90 @@ def pick_and_place(
         ]
 
     return Subtask(name="pick_and_place", conditions=conditions, logical=logical, score=score, K=K)
+
+
+@composite
+def pick_and_place_grouped(
+    groups: list[dict],
+    logical: Literal["all", "any", "choose"] = "all",
+    K: Optional[int] = None,
+    score: float = 1.0,
+) -> Subtask:
+    """
+    A composite subtask where DIFFERENT objects go to DIFFERENT
+    containers, all tracked in parallel within a single Subtask.
+
+    Use when a phase has multiple destinations and within-phase order
+    doesn't matter — e.g. a swap task where each object's final
+    destination is fixed but the policy is free to use any maneuver
+    (direct, table-buffered, interleaved).  Encoding the phase as
+    multiple sequential ``pick_and_place(..., container=X)`` subtasks
+    instead would hard-code one specific maneuver and produce a
+    non-monotone score curve under any other policy strategy.
+
+    Each ``groups`` entry is a dict ``{"object": <str | list>,
+    "container": <str>}``.  Each named object becomes one parallel
+    ladder in the resulting Subtask, with its terminal condition
+    pointing at the group's container.  All objects across all groups
+    track simultaneously; ``logical`` aggregates over the per-object
+    completions just as for ``pick_and_place``.
+
+    Args:
+        groups: List of group dicts.  Each ``{"object": str | list[str],
+            "container": str}`` defines one or more objects bound to a
+            single container.
+        logical: Completion mode — same semantics as ``pick_and_place``.
+            ``"all"`` (default) requires every object across every group
+            to complete its ladder.  ``"any"`` succeeds when any single
+            object's ladder completes.  ``"choose"`` requires exactly K
+            object-ladders complete.
+        K: Required for ``logical="choose"``.
+        score: Overall score weight for this Subtask.
+
+    Returns:
+        Subtask: with one parallel per-object ladder per (object,
+        container) pair across all groups.
+
+    Example:
+        # Each fruit → bowl, each can → bin; any order across all four
+        pick_and_place_grouped(
+            groups=[
+                {"object": ["lemon_02", "lime01"], "container": "bowl"},
+                {"object": ["tuna_can", "corn_can"], "container": "bin_a01"},
+            ],
+            logical="all",
+            score=1.0,
+        )
+
+    Note:
+        Use this for subtask tracking only, not for termination
+        conditions.  For terminations,
+        ``object_groups_in_containers`` consumes the same shape.
+    """
+    conditions: dict = {}
+    for grp in groups:
+        cont = grp["container"]
+        objs = grp["object"]
+        if isinstance(objs, str):
+            objs = [objs]
+        for obj_name in objs:
+            conditions[obj_name] = [
+                (partial(object_grabbed, object=obj_name), 0.25),
+                (partial(object_above_bottom, object=obj_name,
+                         reference_object=cont), 0.25),
+                (partial(object_dropped, object=obj_name), 0.25),
+                (partial(object_in_container, object=obj_name,
+                         container=cont, tolerance=0.01), 0.25),
+            ]
+
+    return Subtask(
+        name="pick_and_place_grouped",
+        conditions=conditions,
+        logical=logical,
+        score=score,
+        K=K,
+    )
+
 
 
 @composite
@@ -132,7 +216,7 @@ def object_in_contact(
 def object_grabbed(
     env,
     object: str,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     env_id: int | None = None,
 ):
     """Check if an object is currently being grabbed by the gripper (in contact with gripper)."""
@@ -146,12 +230,12 @@ def object_grabbed(
 def object_dropped(
     env,
     object: str,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     env_id: int | None = None,
 ):
-    """Check if an object has been dropped (not in contact with gripper)."""
+    """Check if an object has been dropped (in contact with none of the given grippers)."""
     world = get_world(env)
-    result = _not(in_contact(world, object, gripper_name, env_id=env_id))
+    result = gripper_detached(world, object, gripper_name, env_id=env_id)
     if robolab.constants.DEBUG:
         print(f"object_dropped: '{object}' not in contact with '{gripper_name}' -> {result}")
     return result
@@ -195,7 +279,7 @@ def object_in_container(
     require_gripper_detached: bool = False,
     require_stationary: bool = False,
     stationary_threshold: float = 0.05,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -219,7 +303,7 @@ def object_in_container(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         if require_stationary:
             result = _and(result, stationary(world, obj, linear_threshold=stationary_threshold, check_angular=False, env_id=env_id))
         return result
@@ -237,7 +321,7 @@ def object_on_top(
     tolerance: float = 0.01,
     require_contact_with: Union[str, list[str]] = None,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -260,7 +344,7 @@ def object_on_top(
         if require_contact_with is not None:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -278,7 +362,7 @@ def object_on_bottom(
     mode: str = "bbox",
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -291,7 +375,7 @@ def object_on_bottom(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -307,7 +391,7 @@ def object_on_center(
     tolerance: float = 0.01,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -320,7 +404,7 @@ def object_on_center(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -338,7 +422,7 @@ def object_left_of(
     cone_deg: int = 45,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -353,7 +437,7 @@ def object_left_of(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -371,7 +455,7 @@ def object_right_of(
     cone_deg: int = 45,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -386,7 +470,7 @@ def object_right_of(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -404,7 +488,7 @@ def object_in_front_of(
     cone_deg: int = 45,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -419,7 +503,7 @@ def object_in_front_of(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -437,7 +521,7 @@ def object_behind(
     cone_deg: int = 45,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -452,7 +536,7 @@ def object_behind(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -468,7 +552,7 @@ def object_next_to(
     dist: float = 0.05,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -481,7 +565,7 @@ def object_next_to(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -499,7 +583,7 @@ def object_below_top(
     mode: str = "bbox",
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -512,7 +596,7 @@ def object_below_top(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -530,7 +614,7 @@ def object_below(
     mode: str = "bbox",
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -543,7 +627,7 @@ def object_below(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -559,7 +643,7 @@ def object_enclosed(
     tolerance: float = 0.01,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -572,7 +656,7 @@ def object_enclosed(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -588,7 +672,7 @@ def object_inside(
     tolerance: float = 0.01,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -601,7 +685,7 @@ def object_inside(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -617,7 +701,7 @@ def object_outside_of(
     tolerance: float = 0.01,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -635,7 +719,7 @@ def object_outside_of(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -651,7 +735,7 @@ def object_upright(
     up_axis: str = "z",
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -667,7 +751,7 @@ def object_upright(
         if require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -682,7 +766,7 @@ def object_at(
     position: tuple[float, float, float],
     tolerance: float = 0.02,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -695,7 +779,7 @@ def object_at(
     object_list = [object] if isinstance(object, str) else list(object)
     pos_target = torch.tensor(position, dtype=torch.float32, device=world.env.device)
 
-    def check_obj(obj, env_id=None):
+    def check_obj(world, obj, env_id=None):
         pos, _ = world.get_pose(obj, env_id=env_id)
         if env_id is not None:
             at_pos = torch.allclose(pos, pos_target, atol=tolerance)
@@ -707,7 +791,7 @@ def object_at(
             diff = torch.abs(pos - pos_target.unsqueeze(0))
             at_pos = (diff <= tolerance).all(dim=1)  # (N,)
             if require_gripper_detached:
-                at_pos = at_pos & _not(in_contact(world, obj, gripper_name, env_id=None))
+                at_pos = at_pos & gripper_detached(world, obj, gripper_name, env_id=None)
             return at_pos
 
     result = evaluate_spatial_condition(env, object, check_obj, logical, K, env_id=env_id)
@@ -725,7 +809,7 @@ def object_between(
     alignment_tolerance: float = 0.1,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -736,7 +820,7 @@ def object_between(
         if require_contact_with and require_contact_with is not True:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -789,7 +873,7 @@ def object_center_of(
     tolerance: float = 0.01,
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -802,7 +886,7 @@ def object_center_of(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -820,7 +904,7 @@ def object_above(
     mode: str = "bbox",
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -833,7 +917,7 @@ def object_above(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=env_id))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -851,7 +935,7 @@ def object_above_bottom(
     mode: str = "bbox",
     require_contact_with: Union[bool, str, list[str]] = False,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -875,7 +959,7 @@ def object_outside_of_and_on_surface(
     surface: str,
     tolerance: float = 0.01,
     require_gripper_detached: bool = False,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     logical: str = "all",
     K: int = 1,
     env_id: int | None = None,
@@ -891,7 +975,7 @@ def object_outside_of_and_on_surface(
             world.is_supported_on_surface(obj, surface, env_id=env_id)
         )
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=env_id)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=env_id))
         return result
 
     result = evaluate_spatial_condition(env, object, condition, logical, K, env_id=env_id)
@@ -947,7 +1031,7 @@ def object_groups_in_containers(
 def wrong_object_grabbed(
     env,
     object: str | list[str],
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     ignore_objects: list[str] = ["table"],
     env_id: int | None = None,
 ):
@@ -988,7 +1072,7 @@ def wrong_object_grabbed(
 def get_wrong_object_grabbed(
     env,
     intended_objects: str | list[str],
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     ignore_objects: list[str] = ["table"],
     env_id: int | None = None,
 ) -> str | None:
@@ -996,9 +1080,6 @@ def get_wrong_object_grabbed(
     Note: inherently per-env, defaults to env_id=0 when None."""
     if env_id is None:
         env_id = 0
-
-    if not gripper_slightly_closed(env, env_id=env_id):
-        return None
 
     if isinstance(intended_objects, str):
         intended_set = {intended_objects}
@@ -1009,17 +1090,23 @@ def get_wrong_object_grabbed(
     candidates = [obj for obj in env.cfg.contact_object_list if obj not in ignore_set]
 
     world = get_world(env)
-    objects_in_contact = world.get_objects_in_contact_with(gripper_name, candidates, env_id=env_id)
-
-    for obj in objects_in_contact:
-        if obj not in intended_set:
-            return obj
+    labels = world.resolve_contact_bodies(gripper_name)
+    for label in labels:
+        # A collision with an open hand is not a grab. Evaluate closure and
+        # contact for the same concrete hand instead of combining them across
+        # a bimanual alias.
+        if not gripper_slightly_closed(env, gripper_name=label, env_id=env_id):
+            continue
+        objects_in_contact = world.get_objects_in_contact_with(label, candidates, env_id=env_id)
+        for obj in objects_in_contact:
+            if obj not in intended_set:
+                return obj
     return None
 
 
 def gripper_hit_table(
     env,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     table_name: str = "table",
     env_id: int | None = None,
 ):
@@ -1034,45 +1121,77 @@ def gripper_hit_table(
 def gripper_fully_closed(
     env,
     robot_name: str = "robot",
-    gripper_joint_name: str = "finger_joint",
+    gripper_joint_name: str | None = None,
     closed_threshold: float = 0.75,
     env_id: int | None = None,
+    gripper_name: str = "gripper",
 ):
-    """Check if the gripper is fully closed (or nearly closed)."""
+    """Check whether any selected concrete gripper is sufficiently closed.
+
+    Robots may publish ``env.cfg.gripper_closure_cfg`` as a mapping from concrete
+    contact labels to ``(joint_name, open_position, closed_position)``. The
+    legacy Droid contract remains the fallback when no declaration is present.
+    """
     import math as _math
 
     world = get_world(env)
     joint_positions = world.get_joint_positions(robot_name, env_id=env_id)
     joint_names = world.get_joint_names(robot_name)
+    state_cfg: dict[str, tuple[str, float, float]] = getattr(env.cfg, "gripper_closure_cfg", None) or {}
+    labels = world.resolve_contact_bodies(gripper_name)
 
-    if gripper_joint_name not in joint_names:
-        if env_id is not None:
-            return False
-        return torch.zeros(world.env.num_envs, dtype=torch.bool, device=world.env.device)
+    # Preserve explicit and pre-declaration callers that use Droid's original
+    # single finger joint contract.
+    if gripper_joint_name is not None:
+        labels = [labels[0] if labels else "gripper"]
+        state_cfg = {labels[0]: (gripper_joint_name, 0.0, _math.pi / 4)}
+    elif not state_cfg:
+        labels = [labels[0] if labels else "gripper"]
+        state_cfg = {labels[0]: ("finger_joint", 0.0, _math.pi / 4)}
 
-    joint_idx = joint_names.index(gripper_joint_name)
-    max_closed_position = _math.pi / 4
+    closed_states: list[bool | torch.Tensor] = []
+    for label in labels:
+        cfg = state_cfg.get(label)
+        if cfg is None or cfg[0] not in joint_names:
+            closed_states.append(
+                False
+                if env_id is not None
+                else torch.zeros(world.env.num_envs, dtype=torch.bool, device=world.env.device)
+            )
+            continue
+
+        joint_name, open_position, closed_position = cfg
+        span = closed_position - open_position
+        if abs(span) < 1.0e-9:
+            raise ValueError(f"Gripper '{label}' has identical open and closed positions")
+        joint_idx = joint_names.index(joint_name)
+        gripper_pos = joint_positions[joint_idx] if env_id is not None else joint_positions[:, joint_idx]
+        normalized_pos = (gripper_pos - open_position) / span
+        state = normalized_pos >= closed_threshold
+        closed_states.append(bool(state.item()) if env_id is not None else state)
 
     if env_id is not None:
-        gripper_pos = joint_positions[joint_idx].item()
-        normalized_pos = gripper_pos / max_closed_position
-        return normalized_pos >= closed_threshold
-    else:
-        # joint_positions: (N, num_joints)
-        gripper_pos = joint_positions[:, joint_idx]
-        normalized_pos = gripper_pos / max_closed_position
-        return normalized_pos >= closed_threshold
+        return any(closed_states)
+    return torch.stack(closed_states, dim=0).any(dim=0)
 
 
 def gripper_slightly_closed(
     env,
     robot_name: str = "robot",
-    gripper_joint_name: str = "finger_joint",
+    gripper_joint_name: str | None = None,
     closed_threshold: float = 0.30,
     env_id: int | None = None,
+    gripper_name: str = "gripper",
 ):
     """Check if the gripper is slightly closed (at least 30% closed by default)."""
-    return gripper_fully_closed(env, robot_name, gripper_joint_name, closed_threshold, env_id=env_id)
+    return gripper_fully_closed(
+        env,
+        robot_name,
+        gripper_joint_name,
+        closed_threshold,
+        env_id=env_id,
+        gripper_name=gripper_name,
+    )
 
 
 #########################################################
@@ -1109,7 +1228,7 @@ def objects_placed_in_container_in_order(
     tolerance: float = 0.01,
     require_contact_with: Union[bool, str, list[str]] = True,
     require_gripper_detached: bool = True,
-    gripper_name: str = "gripper",
+    gripper_name: str | list[str] = "gripper",
     strict: bool = False,
     key: str | None = None,
     env_id: int | None = None,
@@ -1155,7 +1274,7 @@ def objects_placed_in_container_in_order(
         elif require_contact_with:
             result = _and(result, in_contact(world, obj, require_contact_with, env_id=eid))
         if require_gripper_detached:
-            result = _and(result, _not(in_contact(world, obj, gripper_name, env_id=eid)))
+            result = _and(result, gripper_detached(world, obj, gripper_name, env_id=eid))
         return result
 
     if env_id is None:

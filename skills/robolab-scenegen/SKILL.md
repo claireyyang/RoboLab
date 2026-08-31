@@ -247,11 +247,32 @@ Where:
 - `<x>, <y>` = solved positions from the spatial solver
 - `<z>` = `dims[2] / 2 + 0.002` (from the solver output)
 
-### Step 3: Insert into base scene
+### Step 3: Rewrite inherited payload paths (subdir scenes only)
 
-Take the base_empty.usda content and insert the object prim blocks just before the final `}` that closes the `def Xform "world"` block.
+`base_empty.usda` lives at `assets/scenes/base_empty.usda` and uses relative payloads like `@../fixtures/table_oak.usd@` and `@../fixtures/franka_table.usd@`. Those paths resolve correctly only when the *target* scene also sits at `assets/scenes/` (depth 1 from `assets/`).
 
-### Step 4: Write the file
+If the target scene is one directory deeper (e.g. `assets/scenes/generated/foo.usda` or `assets/scenes/wip480/foo.usda`, depth 2), you **must** prepend one extra `../` to every inherited payload before inserting objects — otherwise the table and franka_table won't load, and physics will let objects fall through to the ground plane during settle. This is silent: the scene still opens, but the table is invisible and objects end up on the floor at z ≈ -0.67.
+
+General rule: for a scene at depth `N` from `assets/`, prepend `(N − 1)` extra `../` segments to each `@../...@` payload inherited from base_empty.
+
+Example — for a scene in `assets/scenes/wip480/`:
+- `@../fixtures/table_oak.usd@` → `@../../fixtures/table_oak.usd@`
+- `@../fixtures/franka_table.usd@` → `@../../fixtures/franka_table.usd@`
+
+A simple regex substitution over the base content before insertion is sufficient:
+
+```python
+import re
+if scene_depth > 1:
+    prefix = "../" * (scene_depth - 1)
+    base = re.sub(r"@(\.\./)", lambda m: "@" + prefix + m.group(1), base)
+```
+
+### Step 4: Insert into base scene
+
+Take the (possibly path-rewritten) base_empty.usda content and insert the object prim blocks just before the final `}` that closes the `def Xform "world"` block.
+
+### Step 5: Write the file
 
 Write the complete USDA content to the output path using the Write tool.
 
@@ -304,6 +325,9 @@ Where `<ISAACSIM_PYTHON>` is the interpreter found in Step 0.
 - The `--replace` flag overwrites the original USDA with settled positions.
 - The `--screenshot` flag renders a 640x480 image and saves it as `<scene_name>.png` in the screenshot directory.
 - Ignore warnings about GLFW, windowing, MDL parameters — these are expected in headless mode.
+- **Always pass `--replace`** when settling scenes that live in a subdirectory. Without it, `settle_scenes.py` writes the settled file to `SCENE_DIR/<name>.usda` (i.e. `assets/scenes/<name>.usda`), not back into the subdirectory — which loses the depth-corrected payload paths and screenshots render empty.
+
+**Sanity-check after settle:** open one settled `.usda` and verify at least one object's `xformOp:translate` has `z` close to the expected `dims[2] / 2` (e.g. 0.02–0.10). If objects show `z ≈ -0.67`, they fell through to the ground plane — almost always because the table payload path was wrong during settle (see Step 3 above). Fix the payload paths in the source USDAs, then re-settle; re-running settle on already-fallen objects will not move them back onto the table.
 
 ### Step 2: Show the screenshot to the user
 

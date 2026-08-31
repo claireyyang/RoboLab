@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """Policy episode runner for RoboLab.
 
@@ -68,7 +68,17 @@ def cleaned_video_stem(instruction: str) -> str:
     return cleaned[:_MAX_VIDEO_STEM_LEN]
 
 
-def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=False, save_videos=True, video_mode="all"):
+def run_episode(
+    env,
+    env_cfg,
+    episode,
+    client: InferenceClient,
+    *,
+    headless=False,
+    save_videos=True,
+    video_mode="all",
+    enable_gt_state=False,
+):
     """Run a policy-controlled episode across all parallel envs.
 
     The policy client is constructed by the caller (typically a per-policy
@@ -84,6 +94,9 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
         headless: If True, don't display video
         save_videos: If True, save per-env episode videos
         video_mode: Which videos to save: 'all', 'viewport', 'sensor', or 'none'
+        enable_gt_state: Attach per-env ground-truth sim state to the obs dict
+            as ``obs["gt_state"] = {env_id: state}`` each step (see
+            ``robolab/eval/gt_state.py`` for the schema).
 
     Returns:
         tuple: (env_results, subtask_status, timing)
@@ -108,7 +121,7 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
 
     subtask_status = []
 
-    clients = [client] * env.num_envs
+    client.begin_episode(episode)
 
     # Set up per-run HDF5 file and per-env demo indices
     if env.recorder_manager is not None and hasattr(env.recorder_manager, 'set_hdf5_file'):
@@ -133,6 +146,15 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
                 video_path_viewport = os.path.join(get_output_dir(), f"{cleaned_instruction}{suffix}_viewport.mp4")
                 video_writers_viewport.append(VideoWriter(video_path_viewport, video_fps))
 
+    gt_exporter = None
+    if enable_gt_state:
+        try:
+            from robolab.eval.gt_state import GroundTruthStateExporter
+
+            gt_exporter = GroundTruthStateExporter(env, env_cfg)
+        except Exception:
+            logger.exception("Failed to initialize the GT-state exporter")
+
     import omni.kit.app
     import omni.timeline
     timeline = omni.timeline.get_timeline_interface()
@@ -145,12 +167,32 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
             while not timeline.is_playing():
                 kit_app.update()
 
+            # Attach per-env ground-truth state so clients that want privileged
+            # sim state can pick out their env's entry (see robolab/eval/gt_state.py).
+            if gt_exporter is not None:
+                try:
+                    obs["gt_state"] = gt_exporter.export_all(list(env.active_env_ids))
+                except Exception:
+                    logger.exception(
+                        "GT-state export failed at step %d; disabling it for the rest of the episode. "
+                        "Clients will stop receiving gt_state from this step on.", step,
+                    )
+                    gt_exporter = None
+                    # Drop the previous step's entry rather than forwarding stale state.
+                    obs.pop("gt_state", None)
+
             timer.start("policy_inference")
-            # Infer actions for all active (non-frozen) envs
+            # Infer actions for all active (non-frozen) envs in ONE call.
+            # Batching-capable clients send a single request for every env
+            # needing a replan; the InferenceClient default is a serial
+            # loop, so other policies behave exactly as before.
             actions = torch.zeros(env.num_envs, action_dim, device=env.device)
             last_viz = None
-            for env_id in env.active_env_ids:
-                ret = clients[env_id].infer(obs, instruction, env_id=env_id)
+            rets = client.infer_batch(
+                obs, instruction, env_ids=list(env.active_env_ids)
+            )
+            for env_id in sorted(rets):
+                ret = rets[env_id]
                 actions[env_id] = torch.tensor(ret["action"], device=env.device)
                 if env_id == 0 or last_viz is None:
                     last_viz = ret.get("viz")

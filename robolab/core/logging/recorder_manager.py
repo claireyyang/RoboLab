@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import gc
 import logging
@@ -23,11 +23,16 @@ def get_memory_usage_mb() -> float:
     return process.memory_info().rss / (1024 * 1024)
 
 
-def _env_index_tensor(env_ids, device: torch.device) -> torch.Tensor:
-    """Build a long index tensor on ``device`` for leading-dim env selection."""
-    if isinstance(env_ids, torch.Tensor):
-        return env_ids.to(device=device, dtype=torch.long)
-    return torch.tensor(env_ids, device=device, dtype=torch.long)
+# torch has no advanced-indexing ("index"/"index_cuda") kernel for the wider
+# unsigned integer dtypes on either CPU or CUDA, so `tensor[env_ids]` raises
+# e.g. `RuntimeError: "index_cuda" not implemented for 'UInt16'` (seen on the
+# IsaacSim 5.1 stack for the uint16 subtask status codes recorded under
+# --enable-subtask; also fails on CPU with the same torch-cu128 build). Cast
+# such tensors to int64 for the gather, then restore the original dtype.
+_UNINDEXABLE_DTYPES = tuple(
+    dt for dt in (getattr(torch, name, None) for name in ("uint16", "uint32", "uint64"))
+    if dt is not None
+)
 
 
 def _slice_to_envs(value, env_ids):
@@ -36,17 +41,13 @@ def _slice_to_envs(value, env_ids):
     Terms emit values shaped (num_envs, ...). add_to_episodes uses positional indexing
     on the leading axis, so when forwarding only a subset of rows we need the leading
     dim aligned with env_ids.
-
-    Uses ``index_select`` instead of ``value[env_ids]`` because CUDA advanced indexing
-    is not implemented for some integer dtypes (e.g. uint16 subtask status codes).
     """
     if isinstance(value, dict):
         return {k: _slice_to_envs(v, env_ids) for k, v in value.items()}
     if isinstance(value, torch.Tensor):
-        if value.ndim == 0:
-            return value
-        idx = _env_index_tensor(env_ids, device=value.device)
-        return value.index_select(0, idx)
+        if value.dtype in _UNINDEXABLE_DTYPES:
+            return value.to(torch.int64)[env_ids].to(value.dtype)
+        return value[env_ids]
     return value
 
 
@@ -148,6 +149,17 @@ class RobolabRecorderManager(RecorderManager):
         self._auto_flush_verbose: bool = False  # Print diagnostics on auto-flush
 
         self.initialized = True
+
+    def get_term(self, term_type: type) -> object | None:
+        """Return the first active recorder term of the given type, or None.
+
+        Public accessor so callers (e.g. the GT-state exporter) don't have to
+        reach into the private ``_terms`` dict.
+        """
+        for term in self._terms.values():
+            if isinstance(term, term_type):
+                return term
+        return None
 
     def set_flush_interval(self, interval: int, verbose: bool = False):
         """Set the automatic flush interval.
@@ -352,6 +364,21 @@ class RobolabRecorderManager(RecorderManager):
             return
 
         super().record_pre_reset(env_ids, force_export_or_skip=force_export_or_skip)
+
+        # Override upstream's HDF5 success flag with the authoritative signal.
+        #
+        # Upstream RecorderManager.record_pre_reset derives demo `success` from a
+        # termination term literally named "success". Tasks using the per-object
+        # `success_<obj>` any-of-N pattern (e.g. GrabABagelTask, GrabAFruitTask)
+        # have no such term, so upstream silently records success=False even when
+        # an episode genuinely succeeded. Re-derive from termination_manager.terminated
+        # (the OR of all non-timeout terms) — the same signal env.py uses for the
+        # canonical jsonl — so the HDF5 attr is correct regardless of term naming.
+        # set_success_to_episodes only updates in-memory EpisodeData.success; export
+        # runs later (env.py _reset_idx), so this re-set is picked up on write.
+        if hasattr(self._env, "termination_manager"):
+            success = self._env.termination_manager.terminated[env_ids]
+            self.set_success_to_episodes(env_ids, success)
 
     def record_post_reset(self, env_ids: Sequence[int] | None) -> None:
         """Filter env_ids to non-frozen, then delegate to upstream.

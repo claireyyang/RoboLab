@@ -1,13 +1,18 @@
 <h1><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/ribble.gif"><img src="docs/images/ribble-dark.gif" alt="" height="42" align="absmiddle" /></picture> RoboLab</h1>
 
-[![Website](https://img.shields.io/badge/Website-RoboLab-blue?logo=googlechrome&logoColor=white)](https://research.nvidia.com/labs/srl/projects/robolab)
-[![arXiv](https://img.shields.io/badge/arXiv-2604.09860-b31b1b?logo=arXiv&logoColor=white)](https://arxiv.org/abs/2604.09860)
+[🌐 Website](https://research.nvidia.com/labs/srl/projects/robolab) · [📄 Paper](https://arxiv.org/abs/2604.09860) · [🏆 Leaderboard](https://research.nvidia.com/labs/srl/projects/robolab/leaderboard.html)
 
 **RoboLab** is a task-based evaluation benchmark for robot manipulation policies built on [NVIDIA Isaac Lab](https://github.com/isaac-sim/IsaacLab). It provides 100+ manipulation tasks with automated success detection, a server-client policy architecture, and multi-environment parallel evaluation — designed for reproducible, large-scale benchmarking of generalist robot policies in simulation.
+
+<h4 align="center"><a href="assets/objects/README.md">Objects</a> · <a href="assets/scenes/README.md">Scenes</a> · <a href="robolab/tasks/README.md">Tasks</a> · <a href="robolab/robots/README.md">Robots</a> · <a href="policies/README.md">Policy Clients</a></h4>
 
 <div align="center">
   <img src="docs/images/robolab.png" alt="RoboLab Overview" width="800"/>
 </div>
+
+## News
+
+- **[2026/08]** 🔥 [**RoboVoLo**](https://github.com/NVlabs/RoboVoLo) is released — a task library from the [VoLo](https://chicychen.github.io/VoLo/) project extending RoboLab with long-horizon and reasoning-heavy manipulation tasks, evaluated via the bundled [VoLo policy backend](policies/volo/README.md).
 
 ## Key Features
 
@@ -16,20 +21,31 @@
 - **Rich Asset Libraries**: See a list of [objects](assets/objects/README.md), [scenes](assets/scenes/README.md), and curated [backgrounds](assets/backgrounds/README.md) — everything you need to create new scenes and new tasks for your own evaluation needs.
 - **AI-Enabled Workflows**: Generate new scenes and tasks **in minutes** using natural language with the [/robolab-scenegen](skills/robolab-scenegen/) and [/robolab-taskgen](skills/robolab-taskgen/) Claude Code skills.
 - **Multi-Environment Parallel Evaluation**: Run multiple episodes in parallel across environments with vectorized conditionals and per-environment termination.
-- **Server-Client Policy Architecture**: Policy models run as standalone servers; RoboLab connects via lightweight inference clients (OpenPI, GR00T, and more).
+- **Results Dashboard with Episode Videos and Cross-Experiment Analysis**: A self-contained web [dashboard](docs/dashboard.md) for browsing scenes/tasks, replaying episode videos, and comparing results across experiments.
+
+See the [Ecosystem](docs/ecosystem.md) page for projects built on RoboLab.
 
 ## Getting Started
 
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/). Isaac Sim 5.0 and Isaac Lab 2.2.0 are installed automatically via `uv sync`. See [Requirements](#requirements) for hardware.
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and a system `ffmpeg` (used for video recording). The IsaacSim/IsaacLab stack is selected at install time via a mutually-exclusive extra — `isaac50` (IsaacSim 5.0 / IsaacLab 2.2.0, default) or `isaac51` (IsaacSim 5.1 / IsaacLab 2.3.2.post1). See [Requirements](#requirements) for hardware.
 
 ### Installation
 
 ```bash
-git clone https://github.com/NVlabs/RoboLab.git
+sudo apt install ffmpeg
+git clone <repo_url>
 cd robolab
 uv venv --python 3.11
 source .venv/bin/activate
-uv sync
+uv sync --extra isaac50          # IsaacSim 5.0 / IsaacLab 2.2.0 (default)
+# uv sync --extra isaac51        # IsaacSim 5.1 / IsaacLab 2.3.2.post1
+```
+
+The two stacks cannot coexist in one environment. To keep both available, install each into its own venv via `UV_PROJECT_ENVIRONMENT`:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.venv    uv sync --extra isaac50
+UV_PROJECT_ENVIRONMENT=.venv-51 uv sync --extra isaac51
 ```
 
 Verify installation:
@@ -37,16 +53,7 @@ Verify installation:
 uv run pytest tests/
 ```
 
-This runs the install-verification suite end-to-end: isaaclab importable, all task definitions valid, env factory populated, one full episode runs. The suite auto-accepts the NVIDIA Omniverse EULA so the run is fully headless with no prompts.
-
-Run individual checks:
-```bash
-uv run pytest tests/test_isaaclab.py -v          # isaaclab installed
-uv run pytest tests/test_registered_envs.py -v   # env factory populated
-uv run pytest tests/test_tasks_valid.py -v       # all task definitions valid
-uv run pytest tests/test_run_empty.py -v         # one full episode (default: BananaInBowlTask)
-uv run pytest tests/test_run_empty.py -v --task RubiksCubeTask
-```
+This runs the install-verification suite end-to-end: isaaclab importable, all task definitions valid, env factory populated, one full episode runs. The suite auto-accepts the NVIDIA Omniverse EULA so the run is fully headless with no prompts. More details at [Debugging → Diagnostic Scripts](docs/debug.md#diagnostic-scripts).
 
 > **Running without activating the venv**: if you don't `source .venv/bin/activate`, prefix every `python` command with `uv run` (e.g. `uv run pytest tests/`).
 
@@ -67,30 +74,26 @@ python examples/run_recorded.py --headless
 python examples/run_gripper_toggle.py --task BananaInBowlTask --headless
 ```
 
+> **Replay**: `run_recorded.py` restores the recorded initial state, replays the recorded actions open-loop, and by default replays with the exact env configuration saved next to the recording (`env_cfg.json`). Note that the recorded outcome is not invariant across simulator versions — contact dynamics evolve between IsaacSim/IsaacLab releases (see [Requirements](#requirements)) — and faithful reproduction requires recording and replaying with a single env. See **[Replaying Recorded Episodes](docs/replay.md)** for the full guide, including replaying your own recordings, `--env-config`, and `--validate-states`.
+
 ### Run with a policy
 
-RoboLab uses a **server-client architecture**: your model runs as a standalone server, and RoboLab connects to it via a lightweight inference client. To quickly test RoboLab, try [Pi0-5 via OpenPI](docs/inference.md#openpi-pi0--pi0-fast--pi05).
+RoboLab uses a **server-client architecture**: your model runs as a standalone server, and RoboLab connects to it via a lightweight inference client. To quickly test RoboLab, try [Pi0.5 via OpenPI](policies/pi0_family/README.md).
 
-Each inference client has its own lightweight Python dependency — e.g. Pi0 / Pi0-fast / Pi05 need `openpi-client`, which is **not** installed by `uv sync`. Install only the client(s) you need; see [docs/inference.md](docs/inference.md) for each backend. For example, to use the Pi0 family:
+Quick run after install in the RoboLab terminal, to see it working:
+
 ```bash
-# Clone the OpenPI repo separately and install its client into the RoboLab venv
-git clone git@github.com:xuningy/openpi.git ../openpi
-uv pip install -e ../openpi/packages/openpi-client
+cd robolab
+uv run python policies/pi0_family/run.py --policy pi05 --task BananaInBowlTask --num-envs 10
 ```
-
-1. Start your policy server in a separate terminal.
-2. Run evaluation:
-   ```bash
-   python policies/pi0_family/run.py --policy pi05 --task BananaInBowlTask --num-envs 12 --headless
-   ```
-3. Analyze results:
-   ```bash
-   python analysis/read_results.py output/<your_run_folder>
-   ```
+Use the [dashboard](#dashboard) to view the output written to your local folder.
 
 ### Common CLI Options
 
 ```bash
+# Run headlessly
+python policies/pi0_family/run.py --policy pi05 --headless
+
 # Run on specific tasks (these two are good for sanity checking)
 python policies/pi0_family/run.py --policy pi05 --task BananaInBowlTask RubiksCubeAndBananaTask
 
@@ -100,26 +103,12 @@ python policies/pi0_family/run.py --policy pi05 --tag semantics
 # Run 12 parallel episodes per task
 python policies/pi0_family/run.py --policy pi05 --headless --num-envs 12
 
-# Enable subtask progress tracking
-python policies/pi0_family/run.py --policy pi05 --headless --enable-subtask
+# Disable subtask progress tracking (on by default; drops score/reason from results)
+python policies/pi0_family/run.py --policy pi05 --disable-subtask
 
 # Resume a previous run (skips completed episodes)
 python policies/pi0_family/run.py --policy pi05 --output-folder-name my_previous_run
 ```
-
-## Documentation
-
-Full documentation is at **[docs/README.md](docs/README.md)**, covering:
-
-- [Objects](docs/objects.md), [Scenes](docs/scene.md), [Tasks](docs/task.md) — Creating and managing assets and benchmark tasks
-- [Robots](docs/robots.md), [Cameras](docs/camera.md), [Lighting](docs/lighting.md), [Backgrounds](docs/background.md) — Configuring simulation parameters
-- [Environment Registration](docs/environment_registration.md) — Combining tasks with robot/observation/action configs
-- [Inference Clients](docs/inference.md) — Built-in policy clients and server setup (OpenPI, GR00T)
-- [Evaluating a New Policy](docs/policy.md) — Implementing your own inference client
-- [Running Environments](docs/environment_run.md) — CLI reference and evaluation workflows
-- [Analysis and Results](docs/analysis.md) — Summarizing, comparing, and auditing results
-- [Dashboard](docs/dashboard.md) — Interactive web viewer for benchmark, tasks, scenes, and eval results
-- [Subtask Checking](docs/subtask.md), [Conditionals](docs/task_conditionals.md), [Event Tracking](docs/event_tracking.md) — Advanced task features
 
 ## Example Tasks
 
@@ -156,14 +145,30 @@ uv run robolab-dashboard
 See **[docs/dashboard.md](docs/dashboard.md)** for the full feature tour, CLI
 flags, and the API endpoints under the hood.
 
+## Documentation
+
+Full documentation is at **[docs/README.md](docs/README.md)**, covering:
+
+- [Objects](docs/objects.md), [Scenes](docs/scene.md), [Tasks](docs/task.md) — Creating and managing assets and benchmark tasks
+- [Robots](docs/robots.md), [Cameras](docs/camera.md), [Lighting](docs/lighting.md), [Backgrounds](docs/background.md) — Configuring simulation parameters
+- [Environment Registration](docs/environment_registration.md) — Combining tasks with robot/observation/action configs
+- [Inference Clients](policies/README.md) — A list of supported open-source models and clients
+- [Replaying Recorded Episodes](docs/replay.md) — Playing back recorded HDF5 episodes faithfully
+- [Analysis and Results](docs/analysis.md) — Summarizing, comparing, and auditing results
+- [Dashboard](docs/dashboard.md) — Interactive web viewer for benchmark, tasks, scenes, and eval results
+- [Subtask Checking](docs/subtask.md), [Conditionals](docs/task_conditionals.md), [Event Tracking](docs/event_tracking.md)
+- [Ecosystem](docs/ecosystem.md) — Task libraries and projects built on RoboLab
+
 ## Requirements
 
 | Dependency | Version |
 |---|---|
-| Isaac Sim | 5.0 |
-| Isaac Lab | 2.2.0 |
+| Isaac Sim | 5.0 (default) or 5.1 |
+| Isaac Lab | 2.2.0 (default) or 2.3.2.post1 |
 | Python | 3.11 |
 | Linux | Ubuntu 22.04+ |
+
+> **Note on simulator versions**: IsaacSim 5.0 and 5.1 ship different PhysX builds, so contact-rich dynamics (grasping, object settling) are not invariant across the two stacks. Benchmark results may be subject to differences in simulator dynamics between versions, and are best compared against runs on the same stack. Recorded demonstrations replay most faithfully on the stack they were recorded with.
 
 - **Disk space**: ~8 GB (assets account for ~7 GB)
 - **GPU**: NVIDIA RTX GPU required. Recommend 48GB+ VRAM. See [Isaac Lab's hardware requirements](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html#system-requirements) for recommended GPUs and VRAM.
@@ -171,16 +176,21 @@ flags, and the API endpoints under the hood.
 
 ## License
 
-The RoboLab framework is released under [CC-BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+The RoboLab framework is released under the [Apache License 2.0](./LICENSE).
+
+Third-party dependency licenses are listed in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
 
 ## Citation
 
 ```bibtex
-@misc{yang2026robolab,
-      title={RoboLab: A High-Fidelity Simulation Benchmark for Analysis of Task Generalist Policies},
-      author={Xuning Yang and Rishit Dagli and Alex Zook and Hugo Hadfield and Ankit Goyal and Stan Birchfield and Fabio Ramos and Jonathan Tremblay},
-      year={2026},
-      url={https://arxiv.org/abs/2604.09860},
+@inproceedings{yang2026robolab,
+    author    = {Xuning Yang and Rishit Dagli and Alex Zook and Hugo Hadfield and Ankit Goyal and Stan Birchfield and Fabio Ramos and Jonathan Tremblay},
+    title     = {{RoboLab: A High-Fidelity Simulation Benchmark for Analysis of Task Generalist Policies}},
+    booktitle = {Proceedings of Robotics: Science and Systems},
+    year      = {2026},
+    address   = {Sydney, Australia},
+    month     = {July},
+    url       = {https://arxiv.org/abs/2604.09860}
 }
 ```
 

@@ -1,4 +1,11 @@
-FROM nvcr.io/nvidia/isaac-lab:2.2.0
+# IsaacLab/IsaacSim stack is selected by the base image tag:
+#   2.2.0 -> IsaacLab 2.2.0 / IsaacSim 5.0   (default)
+#   2.3.0 -> IsaacLab 2.3.x  / IsaacSim 5.1
+# The project's isaac extras (isaac50/isaac51) are NOT installed here: the
+# base image already provides the matching IsaacLab/IsaacSim, so `pip install
+# -e .` only pulls the non-isaac deps.
+ARG ISAACLAB_TAG=2.2.0
+FROM nvcr.io/nvidia/isaac-lab:${ISAACLAB_TAG}
 
 # System packages
 RUN apt-get update && \

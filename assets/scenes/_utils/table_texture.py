@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Dictionary mapping scene.usda files to their table textures
 # Extracted from: prepend payload = @../fixtures/table_X.usd@
 

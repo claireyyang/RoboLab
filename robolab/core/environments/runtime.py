@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """Environment runtime utilities.
 
@@ -27,6 +27,41 @@ from robolab.core.task.task import resolve_instruction
 
 logger = logging.getLogger(__name__)
 
+# Maps the user-facing --renderer choice to the Omniverse "/rtx/rendermode"
+# carb value. "realtime" is IsaacLab's default; we leave it unset so behavior
+# is unchanged and only override the carb setting for the path tracer.
+_RENDERER_TO_RTX_MODE = {"realtime": "RaytracedLighting", "pathtracing": "PathTracing"}
+
+
+def _apply_render_settings(env_cfg: ManagerBasedEnvCfg, renderer: str, rendering_mode: str | None) -> None:
+    """Apply renderer mode and quality preset onto ``env_cfg.sim.render``.
+
+    Must be called before the simulation context is created (i.e. before
+    ``gym.make``/``RobolabEnv``), since :class:`isaaclab.sim.RenderCfg` is read
+    when the RTX renderer is configured.
+
+    Args:
+        env_cfg: The environment config whose ``sim.render`` (a ``RenderCfg``) is mutated.
+        renderer: ``"realtime"`` (RaytracedLighting, the default — applied as a no-op
+            to preserve IsaacLab behavior) or ``"pathtracing"`` (PathTracing, which
+            overrides the ``/rtx/rendermode`` carb setting).
+        rendering_mode: Realtime quality preset (``"performance"``/``"balanced"``/
+            ``"quality"``) or ``None`` to leave IsaacLab's default (``"balanced"``).
+    """
+    if renderer not in _RENDERER_TO_RTX_MODE:
+        raise ValueError(f"Unknown renderer '{renderer}'; expected one of {list(_RENDERER_TO_RTX_MODE)}.")
+
+    if rendering_mode is not None:
+        env_cfg.sim.render.rendering_mode = rendering_mode
+
+    # Record the renderer carb setting for both modes so env_cfg.json positively
+    # logs which RTX renderer the run used. For "realtime" this matches IsaacLab's
+    # default (its WAR already enforces "RaytracedLighting"), so it is behavior-
+    # preserving; "pathtracing" is a genuine override.
+    carb_settings = dict(env_cfg.sim.render.carb_settings or {})
+    carb_settings["/rtx/rendermode"] = _RENDERER_TO_RTX_MODE[renderer]
+    env_cfg.sim.render.carb_settings = carb_settings
+
 
 def check_scene_valid(env: ManagerBasedEnv) -> bool:
     """
@@ -49,6 +84,8 @@ def create_env(scene: str | ManagerBasedEnvCfg,
                events=None,
                instruction_type="default",
                policy=None,
+               renderer="realtime",
+               rendering_mode=None,
     ):
     """
     Creates and initializes a gym environment for the specified scene. Supported types: str, ManagerBasedEnvCfg.
@@ -96,6 +133,10 @@ def create_env(scene: str | ManagerBasedEnvCfg,
             when instruction is a plain string. Defaults to "default".
         policy: Policy backend name (e.g., "pi0", "gr00t"). Stored on env_cfg
             so downstream code (e.g., run_episode) can read it.
+        renderer: RTX renderer mode, "realtime" (RaytracedLighting, default) or
+            "pathtracing" (PathTracing). Default preserves IsaacLab behavior.
+        rendering_mode: Realtime quality preset ("performance"/"balanced"/"quality")
+            or None to leave IsaacLab's default ("balanced").
 
     Raises:
         ValueError: If the scene type is not supported or environment creation fails
@@ -127,6 +168,9 @@ def create_env(scene: str | ManagerBasedEnvCfg,
             env_cfg._instruction_variants = env_cfg.instruction
             env_cfg.instruction = resolve_instruction(env_cfg.instruction, instruction_type)
 
+            # Configure the RTX renderer before the sim context is created.
+            _apply_render_settings(env_cfg, renderer, rendering_mode)
+
             # Merge events into the environment configuration if provided
             # This preserves existing events (like reset_scene_to_default) while adding new ones
             if events is not None:
@@ -157,6 +201,9 @@ def create_env(scene: str | ManagerBasedEnvCfg,
         env_cfg._instruction_variants = env_cfg.instruction
         env_cfg.instruction = resolve_instruction(env_cfg.instruction, instruction_type)
 
+        # Configure the RTX renderer before the sim context is created.
+        _apply_render_settings(env_cfg, renderer, rendering_mode)
+
         # Merge events into the environment configuration if provided
         # This preserves existing events (like reset_scene_to_default) while adding new ones
         if events is not None:
@@ -181,6 +228,9 @@ def create_env(scene: str | ManagerBasedEnvCfg,
 
     if policy is not None:
         env_cfg.policy = policy
+
+    # Stamp the resolved renderer for run provenance (serialized into env_cfg.json).
+    env_cfg.renderer = renderer
 
     from robolab.core.utils.print_utils import print_env_info
     env_name = scene if isinstance(scene, str) else env_cfg.__class__.__name__

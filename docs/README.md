@@ -37,13 +37,16 @@ The core concepts are:
 - **[Running Environments](environment_run.md)** — Creating environments, evaluation scripts, CLI reference, and robustness testing
 - **[`num_envs` VRAM size guide](env_vram_size_guide.md)** — Per-task `num_envs` ceiling on L40, measured against pi05
 #### Policy
-- **[Inference Clients](inference.md)** — Built-in policy clients and server setup instructions (OpenPI, GR00T)
+- **[Inference Clients](../policies/README.md)** — Built-in policy clients and server setup instructions
 #### Output
 - **[Data Storage and Output](data.md)** — Output directory structure, HDF5 layout, and episode result fields
+- **[Replaying Recorded Episodes](replay.md)** — Playing back recorded HDF5 episodes: initial-state restore, recorded env config, faithful-reproduction checklist, and state validation
 - **[Analysis and Results Parsing](analysis.md)** — Scripts for summarizing, comparing, and auditing experiment results
 #### Debug
 - **[Debugging](debug.md)** — Verbose/debug flags, world state inspection, and diagnostic scripts
 - **[Known Issues](known_issues.md)** — Documented bugs and workarounds
+#### Ecosystem
+- **[Ecosystem](ecosystem.md)** — Task libraries and projects built on RoboLab
 
 
 ## Developing and Working with RoboLab

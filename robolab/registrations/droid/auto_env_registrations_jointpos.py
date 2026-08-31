@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import random
 
@@ -27,7 +27,8 @@ The columns are:
 
 """
 def auto_register_droid_envs(task_dirs=DEFAULT_TASK_SUBFOLDERS, lighting_intensity=None, task=None, cameras=None,
-                             randomize_background=False, background_seed=None):
+                             randomize_background=False, background_seed=None, viewport_camera=None,
+                             lazy_sensor_update=True, object_state_obs=False):
     """Automatically discover and register tasks.
 
     Args:
@@ -45,6 +46,17 @@ def auto_register_droid_envs(task_dirs=DEFAULT_TASK_SUBFOLDERS, lighting_intensi
               background; assignments are reproducible when ``background_seed`` is provided.
         background_seed: Seed for reproducible per-task background sampling. Ignored if
               ``randomize_background`` is False.
+        viewport_camera: Camera config class for the video-recording viewport.
+              Defaults to ``EgocentricMirroredCameraCfg``.
+        lazy_sensor_update: Passed to the scene config. Set False when sensor
+              annotators beyond rgb (e.g. depth) must render eagerly in headless
+              mode. Default True (IsaacLab default).
+        object_state_obs: If True, each registered env gets an
+              ``object_state_obs`` observation group with ground-truth
+              ``<object>_pos`` (env-local, meters), ``<object>_quat``
+              (world-frame w, x, y, z), and ``<object>_vel`` (world-frame)
+              terms generated from the task's ``contact_object_list``.
+              Default False.
     """
     from robolab.core.environments.factory import auto_discover_and_create_cfgs
     from robolab.core.observations.observation_utils import generate_image_obs_from_cameras, generate_obs_cfg
@@ -62,9 +74,11 @@ def auto_register_droid_envs(task_dirs=DEFAULT_TASK_SUBFOLDERS, lighting_intensi
 
     if cameras is None:
         cameras = WRIST_LEFT
+    if viewport_camera is None:
+        viewport_camera = EgocentricMirroredCameraCfg
 
     ImageObsCfg = generate_image_obs_from_cameras(cameras)
-    ViewportCameraCfg = generate_image_obs_from_cameras([EgocentricMirroredCameraCfg])
+    ViewportCameraCfg = generate_image_obs_from_cameras([viewport_camera])
 
     ObservationCfg = generate_obs_cfg({
         "image_obs": ImageObsCfg(),
@@ -106,10 +120,12 @@ def auto_register_droid_envs(task_dirs=DEFAULT_TASK_SUBFOLDERS, lighting_intensi
         observations_cfg=ObservationCfg(),
         actions_cfg=DroidJointPositionActionCfg(),
         robot_cfg=DroidCfg,
-        camera_cfg=[*scene_cameras, EgocentricMirroredCameraCfg],
+        camera_cfg=[*scene_cameras, viewport_camera],
         lighting_cfg=SphereLightCfg,
         background_cfg=background_cfg,
         contact_gripper=contact_gripper,
+        lazy_sensor_update=lazy_sensor_update,
+        object_state_obs=object_state_obs,
         dt=1 / (60 * 2),
         render_interval=8,
         decimation=8,

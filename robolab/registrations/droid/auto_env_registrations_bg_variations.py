@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import os
 
@@ -26,9 +26,9 @@ BACKGROUND_FILES = [
     "billiard_hall.hdr",
     "art_studio_2k.hdr",
     "aircraft_workshop_01_2k.hdr",
-    "hotel_room_2k.hdr",
+    "hotel_room_4k.hdr",
     "garage_2k.hdr",
-    "machine_shop_01_2k.hdr",
+    "machine_shop_01_4k.hdr",
     "reading_room_2k.hdr",
     "industrial_pipe_and_valve_01_2k.hdr",
 ]

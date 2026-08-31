@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """
 predicate_logic: "Is condition X true?"
@@ -14,6 +14,7 @@ All functions support an `env_id` parameter:
   env_id=int  → single env, returns bool (backward compat)
 """
 
+from functools import reduce
 from typing import Callable
 
 import numpy as np
@@ -266,7 +267,9 @@ def _read_local_mesh_points(world, body_name: str) -> np.ndarray:
     prim_world_to_local = prim_xform_no_scale.GetInverse()
 
     all_points: list[list[float]] = []
-    for child in Usd.PrimRange(prim):
+    # Instanceable SimReady assets keep geometry in an instanced prototype.
+    # Traverse proxies so containment hulls work for bowls, baskets, and crates.
+    for child in Usd.PrimRange(prim, Usd.TraverseInstanceProxies()):
         if not child.IsA(UsdGeom.Mesh):
             continue
         mesh = UsdGeom.Mesh(child)
@@ -822,3 +825,21 @@ def in_contact(world, object1: str | list[str], object2: str | list[str], force_
         ]
         stacked = torch.stack(results, dim=0)  # (num_pairs, N)
         return stacked.all(dim=0)  # (N,)
+
+
+def gripper_detached(world, obj: str, gripper_name: str | list[str], env_id: int | None = None):
+    """Check that an object touches NONE of the given grippers.
+
+    Detachment deliberately inverts the list rule: a positive grip check with
+    ["left", "right"] requires ALL of them (in_contact's all-pairs semantics),
+    but "detached from left and right" means touching neither. Negating the
+    all-pairs check would yield "at least one gripper off", which is never a
+    useful success criterion, so this checks each gripper separately.
+
+    A contact_gripper alias group (e.g. "gripper" on a bimanual robot) already
+    resolves to "any member" inside world.in_contact, so its negation here is
+    also touching-none.
+    """
+    names = [gripper_name] if isinstance(gripper_name, str) else list(gripper_name)
+    detached_each = [_not(in_contact(world, obj, name, force_threshold=0.1, env_id=env_id)) for name in names]
+    return reduce(_and, detached_each)

@@ -64,4 +64,4 @@ All SR / Score cells carry **95% confidence intervals** with the half-width anno
 
 ## Hosting on the LAN
 
-The default `--host 0.0.0.0` binding makes the dashboard reachable on your machine's LAN IP. Share the URL with a colleague (e.g. `http://10.29.92.141:8080`) and they can browse without setting anything up locally. Tighten to `--host 127.0.0.1` if you'd rather keep it loopback-only.
+The default `--host 0.0.0.0` binding makes the dashboard reachable on your machine's LAN IP. Share the URL with a colleague (e.g. `http://<your-lan-ip>:8080`) and they can browse without setting anything up locally. Tighten to `--host 127.0.0.1` if you'd rather keep it loopback-only.

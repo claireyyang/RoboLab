@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """LeRobot v3.0 dataset exporter for RoboLab.
 
 This module converts RoboLab's HDF5 output format to LeRobot v3.0 format,
@@ -63,6 +66,8 @@ from typing import Any
 
 import h5py
 import numpy as np
+
+from robolab.core.logging.frame_compat import demo_robot_root_pose
 
 try:
     import pyarrow as pa
@@ -300,7 +305,9 @@ class LeRobotExporter:
             if "joint_velocity" in robot_states:
                 joint_velocities = np.array(robot_states["joint_velocity"])
 
-        # Extract end-effector pose if available
+        # Extract end-effector pose if available. Position/orientation are in the
+        # robot-root frame (docs/frames.md); the root pose below is the bridge to
+        # env-local scene coordinates.
         ee_position = None
         ee_orientation = None
         if "ee_pose" in demo_group:
@@ -309,6 +316,10 @@ class LeRobotExporter:
                 ee_position = np.array(ee_group["position"])
             if "orientation" in ee_group:
                 ee_orientation = np.array(ee_group["orientation"])
+
+        # Robot root pose (env-local). Pre-contract recordings have no
+        # robot_root_pose group and fall back to the identity pose.
+        root_position, root_orientation = demo_robot_root_pose(demo_group, num_steps=num_samples)
 
         # Build rows
         for i in range(num_samples):
@@ -326,11 +337,16 @@ class LeRobotExporter:
             if joint_velocities is not None and i < len(joint_velocities):
                 row["observation.velocity"] = joint_velocities[i].tolist()
 
-            # Optional: end-effector pose
+            # Optional: end-effector pose (robot-root frame)
             if ee_position is not None and i < len(ee_position):
                 row["observation.ee_position"] = ee_position[i].tolist()
             if ee_orientation is not None and i < len(ee_orientation):
                 row["observation.ee_orientation"] = ee_orientation[i].tolist()
+
+            # Robot root pose (env-local frame)
+            if i < len(root_position):
+                row["observation.robot_root_position"] = root_position[i].tolist()
+                row["observation.robot_root_orientation"] = root_orientation[i].tolist()
 
             rows.append(row)
 
@@ -918,11 +934,13 @@ class LeRobotExporter:
         elif "position" in key.lower():
             if length == 3:
                 return ["x", "y", "z"]
-            elif length == 7:  # pose
-                return ["x", "y", "z", "qx", "qy", "qz", "qw"]
+            elif length == 7:  # pose; quaternions are (w, x, y, z) repo-wide (docs/frames.md)
+                return ["x", "y", "z", "qw", "qx", "qy", "qz"]
         elif "orientation" in key.lower():
+            # Recorded quaternions are (w, x, y, z) (docs/frames.md); the previous
+            # x-first labels misdescribed the data.
             if length == 4:
-                return ["qx", "qy", "qz", "qw"]
+                return ["qw", "qx", "qy", "qz"]
 
         return None
 

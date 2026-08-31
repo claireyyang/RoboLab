@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import isaaclab.sim as sim_utils
 import torch
@@ -13,7 +13,9 @@ from isaaclab.sensors.frame_transformer.frame_transformer import FrameTransforme
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg, OffsetCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
+from isaaclab.utils.math import subtract_frame_transforms
 
+from robolab.core.environments.scene_fixture import FRANKA_TABLE_FIXTURE
 from robolab.robots.franka_definitions import *  # noqa
 
 # Create a copy of the default frame marker config
@@ -145,21 +147,35 @@ class FrankaCfg:
     )
 
 
+# Class-level label, assigned after the class body so configclass does not turn
+# it into a config field. See docs/robots.md#table-fixture.
+FrankaCfg.table_fixture = FRANKA_TABLE_FIXTURE
+# EE-pose recorder channels (HDF5 channel name -> EE body name), consumed by
+# create_recorder_config.
+FrankaCfg.ee_recorder_bodies = {"ee_pose": "panda_hand"}
+
+
 ########################################################
 # Helper functions for observations. Use these for both franka and franka_high_pd.
 ########################################################
 
 def ee_frame_pos(env: ManagerBasedRLEnv, frames_cfg: SceneEntityCfg = SceneEntityCfg("frames")) -> torch.Tensor:
+    """End-effector position (x, y, z) in the robot-root frame (see docs/frames.md)."""
     frames: FrameTransformer = env.scene[frames_cfg.name]
-    ee_frame_pos = frames.data.target_pos_w[:, 0, :] - env.scene.env_origins[:, 0:3]
-
+    robot: Articulation = env.scene["robot"]
+    ee_frame_pos, _ = subtract_frame_transforms(
+        robot.data.root_pos_w, robot.data.root_quat_w, frames.data.target_pos_w[:, 0, :]
+    )
     return ee_frame_pos
 
 
 def ee_frame_quat(env: ManagerBasedRLEnv, frames_cfg: SceneEntityCfg = SceneEntityCfg("frames")) -> torch.Tensor:
+    """End-effector orientation as quaternion (w, x, y, z) in the robot-root frame."""
     frames: FrameTransformer = env.scene[frames_cfg.name]
-    ee_frame_quat = frames.data.target_quat_w[:, 0, :]
-
+    robot: Articulation = env.scene["robot"]
+    _, ee_frame_quat = subtract_frame_transforms(
+        robot.data.root_pos_w, robot.data.root_quat_w, q02=frames.data.target_quat_w[:, 0, :]
+    )
     return ee_frame_quat
 
 

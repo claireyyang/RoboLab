@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Physical solver for 3D object placement with physics simulation.
 
 This module implements physics-based placement for stacking and containment.
@@ -134,6 +137,7 @@ class PhysicalSolver:
         if support_dims is None:
             return False
 
+        support_metadata = object_metadata.get(support_name, {})
         if len(group) == 1:
             obj_name, pred = group[0]
             return self._solve_place_on(
@@ -143,7 +147,7 @@ class PhysicalSolver:
                 object_dims[obj_name],
                 support_dims,
                 support_slots,
-                object_metadata.get(support_name, {}),
+                support_metadata,
             )
 
         support_yaw = support_state.yaw or 0.0
@@ -161,6 +165,10 @@ class PhysicalSolver:
             self._ensure_place_on_orientation(obj_state, pred)
             local_yaw = self._normalize_yaw((obj_state.yaw or 0.0) - support_yaw)
             footprint_x, footprint_y = self._rotated_footprint(obj_dims, local_yaw)
+            placement_support_dims = self._placement_support_dims(
+                support_dims,
+                support_metadata,
+            )
 
             if obj_state.x is not None and obj_state.y is not None:
                 local_x, local_y = self._to_local_support_offset(
@@ -174,7 +182,7 @@ class PhysicalSolver:
                     local_y,
                     footprint_x,
                     footprint_y,
-                    support_dims,
+                    placement_support_dims,
                 ):
                     return False
                 if self._rect_overlaps_layer(
@@ -194,7 +202,7 @@ class PhysicalSolver:
                 (local_x, local_y)
                 for local_x, local_y in self._candidate_support_offsets(
                     pred.relative_position,
-                    support_dims,
+                    placement_support_dims,
                     footprint_x,
                     footprint_y,
                 )
@@ -203,7 +211,7 @@ class PhysicalSolver:
                     local_y,
                     footprint_x,
                     footprint_y,
-                    support_dims,
+                    placement_support_dims,
                 )
             ]
             if not candidates:
@@ -241,7 +249,7 @@ class PhysicalSolver:
                 support_state,
                 support_dims,
                 obj_dims,
-                object_metadata.get(support_name, {}),
+                support_metadata,
             ):
                 return False
 
@@ -315,8 +323,14 @@ class PhysicalSolver:
 
         if support_slots is None:
             support_slots = []
+        if support_metadata is None:
+            support_metadata = {}
 
         support_yaw = support_state.yaw or 0.0
+        placement_support_dims = self._placement_support_dims(
+            support_dims,
+            support_metadata,
+        )
 
         self._ensure_place_on_orientation(obj_state, pred)
 
@@ -326,7 +340,7 @@ class PhysicalSolver:
             footprint_x, footprint_y = self._rotated_footprint(obj_dims, local_yaw)
             slot = self._find_support_slot(
                 pred.relative_position,
-                support_dims,
+                placement_support_dims,
                 footprint_x,
                 footprint_y,
                 support_slots,
@@ -348,6 +362,14 @@ class PhysicalSolver:
         )
         local_yaw = self._normalize_yaw((obj_state.yaw or 0.0) - support_yaw)
         footprint_x, footprint_y = self._rotated_footprint(obj_dims, local_yaw)
+        if not self._fits_support_rectangle(
+            local_x,
+            local_y,
+            footprint_x,
+            footprint_y,
+            placement_support_dims,
+        ):
+            return False
         support_slots.append((local_x, local_y, footprint_x, footprint_y))
 
         return self._finish_place_on(
@@ -356,7 +378,7 @@ class PhysicalSolver:
             support_state,
             support_dims,
             obj_dims,
-            support_metadata or {},
+            support_metadata,
         )
 
     def _ensure_place_on_orientation(
@@ -423,6 +445,30 @@ class PhysicalSolver:
             # Assume support is on table at z=0
             return support_dims[2] if support_dims else 0.05
         return support_state.z + (support_dims[2] / 2 if support_dims else 0.05)
+
+    def _placement_support_dims(
+        self,
+        support_dims: tuple[float, float, float],
+        support_metadata: dict[str, Any],
+    ) -> tuple[float, float, float]:
+        inset = self._support_footprint_inset(support_metadata)
+        if inset <= 0.0:
+            return support_dims
+        return (
+            max(0.0, support_dims[0] - 2 * inset),
+            max(0.0, support_dims[1] - 2 * inset),
+            support_dims[2],
+        )
+
+    @staticmethod
+    def _support_footprint_inset(support_metadata: dict[str, Any]) -> float:
+        try:
+            inset = float(support_metadata.get("support_footprint_inset_m", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(inset):
+            return 0.0
+        return max(0.0, inset)
 
     def _find_support_slot(
         self,

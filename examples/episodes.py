@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 """Episode running utilities for RoboLab examples.
 
@@ -24,6 +24,8 @@ from tqdm import tqdm
 from robolab.constants import PACKAGE_DIR, get_output_dir
 from robolab.core.logging.results import extract_initial_state_info, extract_subtask_info
 from robolab.core.observations.observation_utils import unpack_image_obs, unpack_viewport_cams
+from robolab.core.replay import StateValidator, restore_recorded_initial_state
+from robolab.core.utils.version_utils import warn_on_stack_mismatch
 from robolab.core.utils.video_utils import VideoWriter
 
 
@@ -139,7 +141,8 @@ def run_prerecorded_episode(env, episode, save_videos=True, headless=False):
         video_writer.release()
 
 
-def run_prerecorded_episode_hdf5(env, hdf5_path: str, episode=0, save_videos=True, headless=False):
+def run_prerecorded_episode_hdf5(env, hdf5_path: str, episode=0, save_videos=True, headless=False,
+                                 validate_states=False, state_tolerance=0.01):
 
     obs, _ = env.reset()
 
@@ -152,6 +155,23 @@ def run_prerecorded_episode_hdf5(env, hdf5_path: str, episode=0, save_videos=Tru
     from robolab.core.utils.file_utils import load_hdf5_episode_data
     print(f"Loading actions from {hdf5_path} for episode {episode}")
     actions = load_hdf5_episode_data(hdf5_path, episode, 'actions')
+    warn_on_stack_mismatch(hdf5_path)
+    if env.num_envs > 1:
+        print(f"\033[93mNOTE: replaying with {env.num_envs} envs. Parallel envs share one batched "
+              "physics scene, so trajectories evolve slightly differently than in a single-env "
+              "replay; for faithful reproduction of a recording, replay with a single env.\033[0m")
+
+    # Restore the recorded initial scene state so the open-loop action replay
+    # starts from exactly what the recording env saw (fresh reset() re-settles
+    # objects from USD poses and diverges mid-episode otherwise).
+    restore_recorded_initial_state(env, hdf5_path, episode)
+
+    state_validator = None
+    if validate_states:
+        try:
+            state_validator = StateValidator(hdf5_path, episode, tolerance=state_tolerance)
+        except ValueError as err:
+            print(f"WARNING: cannot validate states ({err}); continuing without validation.")
 
     max_steps = len(actions)
 
@@ -172,6 +192,9 @@ def run_prerecorded_episode_hdf5(env, hdf5_path: str, episode=0, save_videos=Tru
         action = torch.tensor(action).unsqueeze(0).repeat(env.num_envs, 1)
 
         obs, _, term, trunc, info = env.step(action)
+
+        if state_validator is not None:
+            state_validator.check_step(env, i)
 
         status = extract_subtask_info(info)
         if status.get('status') != 0:
@@ -194,6 +217,9 @@ def run_prerecorded_episode_hdf5(env, hdf5_path: str, episode=0, save_videos=Tru
     if save_videos:
         for vw in video_writers:
             vw.release()
+
+    if state_validator is not None:
+        state_validator.report()
 
     # Get per-env results from the env (success/truncated tracking is in RobolabEnv)
     return env.get_env_results(), subtask_status

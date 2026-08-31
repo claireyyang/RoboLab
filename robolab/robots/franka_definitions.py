@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import torch
 from isaaclab.assets import Articulation
@@ -13,6 +13,7 @@ from isaaclab.envs.mdp.actions.actions_cfg import (
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors.frame_transformer.frame_transformer import FrameTransformer
 from isaaclab.utils import configclass
+from isaaclab.utils.math import subtract_frame_transforms
 
 ########################################################
 # Actions
@@ -20,7 +21,10 @@ from isaaclab.utils import configclass
 
 @configclass
 class FrankaIKActionCfg:
-    """
+    """Absolute end-effector pose control via differential IK.
+
+    Cartesian targets are in the robot-root frame (see docs/frames.md).
+
     Note:
         if self.cfg.command_type == "position", action_dim = 3, (x, y, z)
         if self.cfg.command_type == "pose" and self.cfg.use_relative_mode, action_dim = 6, (dx, dy, dz, droll, dpitch, dyaw)
@@ -45,7 +49,10 @@ class FrankaIKActionCfg:
 
 @configclass
 class FrankaRelIKActionCfg:
-    """
+    """Relative end-effector pose control via differential IK.
+
+    Cartesian deltas are on robot-root axes (see docs/frames.md).
+
     Note:
         if self.cfg.command_type == "position", action_dim = 3, (x, y, z)
         if self.cfg.command_type == "pose" and self.cfg.use_relative_mode, action_dim = 6, (dx, dy, dz, droll, dpitch, dyaw)
@@ -71,6 +78,7 @@ class FrankaRelIKActionCfg:
 
 @configclass
 class FrankaJointPositionActionCfg:
+    """Joint-space arm + gripper actions; no Cartesian frame (see docs/frames.md)."""
     arm_action = JointPositionActionCfg(
         asset_name="robot", joint_names=["panda_joint.*"], scale=0.5, use_default_offset=True
     )
@@ -96,16 +104,22 @@ contact_gripper = {"gripper": "{ENV_REGEX_NS}/robot/panda_leftfinger"}
 ########################################################
 
 def ee_frame_pos(env: ManagerBasedRLEnv, ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")) -> torch.Tensor:
+    """End-effector position (x, y, z) in the robot-root frame (see docs/frames.md)."""
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
-    ee_frame_pos = ee_frame.data.target_pos_w[:, 0, :] - env.scene.env_origins[:, 0:3]
-
+    robot: Articulation = env.scene["robot"]
+    ee_frame_pos, _ = subtract_frame_transforms(
+        robot.data.root_pos_w, robot.data.root_quat_w, ee_frame.data.target_pos_w[:, 0, :]
+    )
     return ee_frame_pos
 
 
 def ee_frame_quat(env: ManagerBasedRLEnv, ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")) -> torch.Tensor:
+    """End-effector orientation as quaternion (w, x, y, z) in the robot-root frame."""
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
-    ee_frame_quat = ee_frame.data.target_quat_w[:, 0, :]
-
+    robot: Articulation = env.scene["robot"]
+    _, ee_frame_quat = subtract_frame_transforms(
+        robot.data.root_pos_w, robot.data.root_quat_w, q02=ee_frame.data.target_quat_w[:, 0, :]
+    )
     return ee_frame_quat
 
 

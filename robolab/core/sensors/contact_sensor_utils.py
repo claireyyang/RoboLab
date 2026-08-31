@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 import torch
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
@@ -42,6 +42,41 @@ def create_batch_contact_sensor_cfg(entity_prim_path: str, filter_prim_paths: li
     )
 
 
+def validate_contact_grippers(contact_gripper: dict) -> dict:
+    """Validate a robot's contact_gripper declaration and return its concrete entries.
+
+    Entries are either concrete (label -> prim path, gets sensors) or an alias
+    group (label -> list of concrete labels, meaning "any member" at query
+    time). Groups must be flat: members must be concrete labels declared in
+    the same dict, so query-time resolution is a single lookup.
+
+    Every robot must declare a "gripper" entry — concrete for single-gripper
+    robots, or a group like ["left", "right"] — because benchmark task
+    conditionals default to gripper_name="gripper".
+    """
+    concrete = {name: target for name, target in contact_gripper.items() if isinstance(target, str)}
+    groups = {name: target for name, target in contact_gripper.items() if not isinstance(target, str)}
+    for name, members in groups.items():
+        if not isinstance(members, (list, tuple)) or not members:
+            raise ValueError(
+                f"contact_gripper entry '{name}' must be a prim path or a non-empty list of labels, got {members!r}."
+            )
+        unknown = [member for member in members if member not in concrete]
+        if unknown:
+            raise ValueError(
+                f"contact_gripper group '{name}' references {unknown}, which are not concrete gripper labels. "
+                f"Group members must be prim-path entries in the same dict (no nested groups); "
+                f"declared concrete labels: {sorted(concrete)}."
+            )
+    if "gripper" not in contact_gripper:
+        raise ValueError(
+            "contact_gripper must declare a 'gripper' entry (a prim path, or a group such as "
+            "['left', 'right'] on multi-gripper robots) — benchmark task conditionals assume it. "
+            f"Declared labels: {sorted(contact_gripper)}."
+        )
+    return concrete
+
+
 def create_contact_sensors(env_cfg):
     """
     Dynamically create contact sensors based on contact_gripper and contact_object_list.
@@ -51,6 +86,10 @@ def create_contact_sensors(env_cfg):
     2. Individual pairwise sensors for gripper-object pairs (for backwards compatibility)
     3. Individual pairwise sensors for object-object pairs
 
+    Alias-group entries in contact_gripper (list values, e.g. "gripper":
+    ["left", "right"]) get no sensors of their own; they resolve to their
+    members' sensors at query time in WorldState.
+
     Args:
         env_cfg: Environment configuration containing scene, contact_gripper, and contact_object_list
     """
@@ -59,10 +98,12 @@ def create_contact_sensors(env_cfg):
     if env_cfg.contact_object_list is None or env_cfg.contact_gripper is None:
         return
 
+    concrete_grippers = validate_contact_grippers(env_cfg.contact_gripper)
+
     # Objects to exclude from batch sensor (these are checked separately or not relevant for wrong-grab detection)
     batch_sensor_exclude = {"table"}
 
-    for gripper_name, gripper_prim_path in env_cfg.contact_gripper.items():
+    for gripper_name, gripper_prim_path in concrete_grippers.items():
         # Create batch sensor for gripper vs all objects except excluded ones (for efficient batch queries)
         all_object_prim_paths = [getattr(scene, obj_name).prim_path for obj_name in env_cfg.contact_object_list if obj_name not in batch_sensor_exclude]
         batch_sensor_name = f"{gripper_name}__all_objs"

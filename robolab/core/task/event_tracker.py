@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: CC-BY-NC-4.0
+# SPDX-License-Identifier: Apache-2.0
 
 from typing import Any
 
@@ -495,18 +495,24 @@ class EventTracker:
             return events
 
         world = get_world(env)
-        contact_count = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
 
-        for obj_name in world.objects.keys():
-            if obj_name in ignore_set:
-                continue
-            try:
-                contact = in_contact(world, "gripper", obj_name, env_id=None)  # (N,) bool
-                contact_count += contact.int()
-            except Exception:
-                continue
+        # Count per concrete gripper, not the "gripper" alias group: on a
+        # bimanual robot, one hand clutching several objects is a violation,
+        # but two hands holding one object each is normal behavior.
+        multi = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        for gripper in world.resolve_contact_bodies("gripper"):
+            contact_count = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+            for obj_name in world.objects.keys():
+                if obj_name in ignore_set:
+                    continue
+                try:
+                    contact = in_contact(world, gripper, obj_name, env_id=None)  # (N,) bool
+                    contact_count += contact.int()
+                except Exception:
+                    continue
+            multi |= contact_count > 1
 
-        multi = (contact_count > 1) & eligible
+        multi = multi & eligible
         if multi.any():
             events.append((
                 "Multiple objects grabbed",
